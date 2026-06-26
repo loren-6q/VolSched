@@ -326,10 +326,14 @@
           
           if (matchedTask) {
             let specialistShifts = [];
+            
+            // --- PHASE 1, RULE 3: 100% Specialist Override ---
+            const has100Percent = specialistList.some(s => s.percentage >= 100);
+            
             if (day === "FMP-3" || day === "FMP-2" || day === "FMP-1" || day === "FMP" || day === "FMP2") {
-              specialistShifts = [["1p", "4p"], ["4p", "7p"]];
+              specialistShifts = has100Percent ? [["1p", "4p"], ["4p", "7p"], ["7p", "10p"]] : [["1p", "4p"], ["4p", "7p"]];
             } else if (day === "FMP+1" || day === "FMP+2" || day === "FMP+3" || day === "FMP2+1" || day === "FMP2+2") {
-              specialistShifts = [["2p", "5p"], ["5p", "8p"], ["8p", "11p"]];
+              specialistShifts = has100Percent ? [["2p", "5p"], ["5p", "8p"], ["8p", "11p"]] : [["2p", "5p"], ["5p", "8p"]];
             }
             
             for (const [start, end] of specialistShifts) {
@@ -337,7 +341,8 @@
               if (span <= 0) continue;
               const existingShift = list.find(s => s.day === day && s.task === matchedTask && s.startIdx === startIdx && s.span === span);
               if (!existingShift) {
-                list.push({ id: `${day}|${matchedTask}|${start}-${end}-specialist`, day, task: matchedTask, startIdx, span, min: 1, max: 1, assigned: [], isSpecialistShift: true });
+                const maxSpecialists = has100Percent ? 2 : 1; 
+                list.push({ id: `${day}|${matchedTask}|${start}-${end}-specialist`, day, task: matchedTask, startIdx, span, min: 1, max: maxSpecialists, assigned: [], isSpecialistShift: true });
               }
             }
           }
@@ -485,6 +490,7 @@
         return preferred[0] || null;
       }
 
+      // --- INITIAL FILL (Min Requirements) ---
       const specialistShifts = shifts.filter(sh => sh.isSpecialistShift);
       const regularShifts = shifts.filter(sh => !sh.isSpecialistShift);
       const sortedShifts = [...specialistShifts, ...regularShifts];
@@ -497,6 +503,7 @@
         }
       }
 
+      // --- BUCKETS (Max Limits) ---
       const buckets = {};
       for (const sh of shifts) {
         const key = `${sh.day}::${sh.task}`;
@@ -527,51 +534,102 @@
         }
       }
 
-      const floaterPrefs = ["2p", "6p", "9p", "10p"];
-      const floaterOccupied = new Set();
-      const floaterPerDay = Object.fromEntries(activeDays.map((d) => [d, 0]));
-
+      // --- PHASE 1, RULE 1: FMP-1 & FMP Maximization ---
+      const highVolumeDays = ["FMP-1", "FMP", "FMP2"];
       for (const day of activeDays) {
-        for (const prefIdxLbl of floaterPrefs) {
-          if (floaterPerDay[day] >= 3) break;
-          const idx = HOUR_INDEX[prefIdxLbl];
-          if (idx === undefined) continue;
-          const key = `${day}|${idx}`;
-          if (floaterOccupied.has(key)) continue;
+        if (!highVolumeDays.includes(day)) continue;
+        
+        let progressed = true;
+        while (progressed) {
+          progressed = false;
+          const availableStaff = staff.filter(p => dayHours[day][p] < 9 && !parseStaffName(p).isSpecialist);
           
-          let flo = shifts.find((s) => s.day === day && s.task === "Floater" && s.startIdx === idx && s.span === 1);
-          if (!flo) {
-            flo = { id: `${day}|Floater|${prefIdxLbl}`, day, task: "Floater", startIdx: idx, span: 1, min: 0, max: 1, assigned: [] };
-            shifts.push(flo);
-          }
-          if (flo.assigned.length >= 1) {
-            floaterOccupied.add(key); continue;
-          }
-
-          const minHours = Math.min(...staff.map((s) => weeklyHours[s] || 0));
-          const lowest = staff.filter((p) => (weeklyHours[p] || 0) === minHours);
-
-          const candidate = lowest.find((p) => {
-            const parsed = parseStaffName(p);
-            if (parsed.isSpecialist && parsed.percentage >= 100) return false;
-            if (!dayHours[day]) return false;
-            if ((dayHours[day][p] || 0) + 1 > 9) return false;
-            if (dayBusy[day][p][idx]) return false;
-            
-            const prevShift = shifts.find((s) => s.day === day && s.assigned.includes(p) && s.startIdx + s.span === idx);
-            if (prevShift && prevShift.task === "Floater") return false;
-            const nextShift = shifts.find((s) => s.day === day && s.assigned.includes(p) && idx + 1 === s.startIdx);
-            if (nextShift && nextShift.task === "Floater") return false;
-            return true;
+          // CRITICAL FIX: Sort by WEEKLY hours first, then daily hours! 
+          // This prevents the engine from overloading people who already have high hours.
+          availableStaff.sort((a, b) => {
+            if (weeklyHours[a] !== weeklyHours[b]) return weeklyHours[a] - weeklyHours[b];
+            return dayHours[day][a] - dayHours[day][b];
           });
           
-          if (!candidate) continue;
-          assignPerson(candidate, flo);
-          floaterOccupied.add(key);
-          floaterPerDay[day] += 1;
+          for (const person of availableStaff) {
+            const possibleShifts = shifts.filter(s => s.day === day && canTake(person, s));
+            if (possibleShifts.length > 0) {
+              possibleShifts.sort((a, b) => {
+                const isPromoA = a.task.includes("Promo") ? -1 : 1;
+                const isPromoB = b.task.includes("Promo") ? -1 : 1;
+                if (isPromoA !== isPromoB) return isPromoA - isPromoB;
+                return a.assigned.length - b.assigned.length;
+              });
+              
+              assignPerson(person, possibleShifts[0]);
+              progressed = true;
+              break; 
+            }
+          }
         }
       }
 
+      // --- PHASE 1, RULE 2: Smart Gap Filling (Floater Fix) ---
+      const allHours = staff.filter(p => !parseStaffName(p).isSpecialist).map(s => weeklyHours[s]);
+      const medianWeeklyHours = allHours.length ? allHours.sort((a, b) => a - b)[Math.floor(allHours.length / 2)] : 0;
+      
+      const underworkedStaff = staff.filter(p => weeklyHours[p] < medianWeeklyHours && !parseStaffName(p).isSpecialist);
+      
+      for (const person of underworkedStaff) {
+        let attempts = 0;
+        while (weeklyHours[person] < medianWeeklyHours && attempts < 10) {
+          attempts++;
+          const gap = medianWeeklyHours - weeklyHours[person];
+          let assigned = false;
+          
+          for (const day of activeDays) {
+            const possiblePromo = shifts.find(s => s.day === day && s.task.includes("Promo") && canTake(person, s));
+            if (possiblePromo) {
+              assignPerson(person, possiblePromo);
+              assigned = true;
+              break;
+            }
+          }
+          
+          if (assigned) continue;
+          
+          for (const day of activeDays) {
+            if (dayHours[day][person] >= 9) continue;
+            
+            const span = Math.min(gap, 2); 
+            let foundStartIdx = -1;
+            
+            const tryHours = [HOUR_INDEX["10p"], HOUR_INDEX["9p"], HOUR_INDEX["8p"], HOUR_INDEX["2p"], HOUR_INDEX["4p"]];
+            for (const startIdx of tryHours) {
+              if (startIdx === undefined || startIdx + span > HOURS.length) continue;
+              
+              let free = true;
+              for (let h = startIdx; h < startIdx + span; h++) {
+                if (dayBusy[day][person][h]) { free = false; break; }
+              }
+              
+              if (free) {
+                foundStartIdx = startIdx;
+                break;
+              }
+            }
+            
+            if (foundStartIdx !== -1) {
+              let flo = shifts.find(s => s.day === day && s.task === "Floater" && s.startIdx === foundStartIdx && s.span === span);
+              if (!flo) {
+                flo = { id: `${day}|Floater|${foundStartIdx}-${foundStartIdx + span}`, day, task: "Floater", startIdx: foundStartIdx, span: span, min: 0, max: 99, assigned: [] };
+                shifts.push(flo);
+              }
+              assignPerson(person, flo);
+              assigned = true;
+              break;
+            }
+          }
+          if (!assigned) break; 
+        }
+      }
+
+      // --- ASSEMBLE FINAL RESULTS ---
       const byDay = {};
       for (const d of activeDays) {
         byDay[d] = {};
@@ -594,23 +652,26 @@
         byDay[sh.day][sh.task].push({ startIdx: sh.startIdx, span: sh.span, people: [...sh.assigned] });
       }
       
-      for (const d of Object.keys(byDay))
-        for (const t of Object.keys(byDay[d]))
+      for (const d of Object.keys(byDay)) {
+        for (const t of Object.keys(byDay[d])) {
           byDay[d][t].sort((a, b) => a.startIdx - b.startIdx);
+        }
+      }
 
       for (const d of activeDays) {
         if (!byDay[d]['Floater']) byDay[d]['Floater'] = [];
       }
 
-      const weeklyTotals = Object.fromEntries(staff.map((s) => [s, 0]));
-      const byTaskTotals = Object.fromEntries(staff.map((s) => [s, {}]));
-      const byDayTotals = Object.fromEntries(staff.map((s) => [s, Object.fromEntries(activeDays.map((d) => [d, 0]))]));
+      // Weekly totals are already calculated accurately via the swaps, but we rebuild them to match the output payload format cleanly
+      const finalWeeklyTotals = Object.fromEntries(staff.map((s) => [s, 0]));
+      const finalByTaskTotals = Object.fromEntries(staff.map((s) => [s, {}]));
+      const finalByDayTotals = Object.fromEntries(staff.map((s) => [s, Object.fromEntries(activeDays.map((d) => [d, 0]))]));
       
       for (const sh of shifts) {
         for (const p of sh.assigned) {
-          weeklyTotals[p] += sh.span;
-          byTaskTotals[p][sh.task] = (byTaskTotals[p][sh.task] || 0) + sh.span;
-          byDayTotals[p][sh.day] += sh.span;
+          finalWeeklyTotals[p] += sh.span;
+          finalByTaskTotals[p][sh.task] = (finalByTaskTotals[p][sh.task] || 0) + sh.span;
+          finalByDayTotals[p][sh.day] += sh.span;
         }
       }
 
@@ -622,7 +683,7 @@
         return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
       });
       
-      return { byDay, weeklyTotals, byTaskTotals, byDayTotals, activeDays, shifts };
+      return { byDay, weeklyTotals: finalWeeklyTotals, byTaskTotals: finalByTaskTotals, byDayTotals: finalByDayTotals, activeDays, shifts };
     }
 
     function deepClone(v) { return JSON.parse(JSON.stringify(v)); }
@@ -880,6 +941,23 @@
        UI COMPONENTS
        ========================================================= */
 
+    function StaffEditor({ value, onChange }) {
+      const [text, setText] = useState(value);
+
+      useEffect(() => {
+        if (value !== text) setText(value);
+      }, [value]);
+
+      useEffect(() => {
+        const timeout = setTimeout(() => {
+          if (text !== value) onChange(text);
+        }, 400);
+        return () => clearTimeout(timeout);
+      }, [text, value, onChange]);
+
+      return <textarea rows={12} value={text} onChange={(e) => setText(e.target.value)} />;
+    }
+
     function CustomDialog({ dialog, onClose }) {
       if (!dialog) return null;
       return (
@@ -1129,7 +1207,7 @@
         >
           <div className="cell-wrap" style={{ alignItems: "stretch" }}>
             {(!people || people.length === 0) && (
-               <div style={{ color: "#666", textAlign: "center", position: 'relative' }} onMouseOver={() => setIsHovered(true)} onMouseLeave={() => setIsHovered(false)}>
+               <div className="no-export" style={{ color: "#666", textAlign: "center", position: 'relative' }} onMouseOver={() => setIsHovered(true)} onMouseLeave={() => setIsHovered(false)}>
                  —
                  <div style={{ position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)', opacity: isHovered ? 1 : 0, transition: 'opacity 0.2s', pointerEvents: isHovered ? 'auto' : 'none' }}>
                    <button className="btn inline" onClick={(e) => { e.stopPropagation(); setModalState({ type: "add", person: null }); }}>add</button>
@@ -1268,7 +1346,7 @@
           sh.assigned.push(nameSel);
           out.shifts.push(sh);
           if (!out.byDay[day]) out.byDay[day] = {};
-          if (!out.byDay[day][taskSel]) out.byDay[taskSel] = [];
+          if (!out.byDay[day][taskSel]) out.byDay[day][taskSel] = [];
           out.byDay[day][taskSel].push({ startIdx: hourIndex, span: spanSel, people: [nameSel] });
           return recomputeSummaries(out);
         });
@@ -1282,8 +1360,8 @@
       return (
         <td style={{ backgroundColor: "#FFFFFF", textAlign: "center", padding: "8px", position: 'relative' }} onMouseOver={() => setIsHovered(true)} onMouseLeave={() => setIsHovered(false)}>
           <div className="cell-wrap" style={{ minHeight: 22 }}>
-            <div style={{ color: "#999" }}>—</div>
-            <div style={{ position: "absolute", right: 6, top: 6, opacity: isHovered || open ? 1 : 0, transition: "opacity 0.2s ease-in-out" }}>
+            <div className="no-export" style={{ color: "#999" }}>—</div>
+            <div className="no-export" style={{ position: "absolute", right: 6, top: 6, opacity: isHovered || open ? 1 : 0, transition: "opacity 0.2s ease-in-out" }}>
               <button className="btn inline" onClick={(e) => { e.stopPropagation(); setOpen(true); }}>add</button>
             </div>
             {open && (
@@ -1387,8 +1465,14 @@
             let maxHour = HOURS.length - 1;
             
             if (isCompactView && dayShifts.length > 0) {
-              minHour = Math.min(...dayShifts.map(s => s.startIdx));
-              maxHour = Math.max(...dayShifts.map(s => s.startIdx + s.span - 1));
+              const activeShifts = dayShifts.filter(s => s.assigned && s.assigned.length > 0);
+              if (activeShifts.length > 0) {
+                minHour = Math.min(...activeShifts.map(s => s.startIdx));
+                maxHour = Math.max(...activeShifts.map(s => s.startIdx + s.span - 1));
+              } else {
+                minHour = 0;
+                maxHour = 0;
+              }
             }
             
             const displayHours = [];
@@ -1398,15 +1482,18 @@
             if (isCompactView) {
               dayTasks = orderedTasks.filter(task => {
                 const blocks = byDay?.[d]?.[task] || [];
-                return blocks.length > 0;
+                return blocks.some(b => b.people && b.people.length > 0);
               });
             }
+            
+            // If the day is completely empty and we are in compact view, hide the entire day box
+            if (isCompactView && dayTasks.length === 0) return null;
 
             return (
               <div className={`day-block ${i % 2 === 0 ? "alt0" : "alt1"}`} key={d}>
                 <div className="day-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span>{dayHeader(d)}</span>
-                  <button className="btn inline ghost" style={{ fontSize: 11, padding: '2px 6px' }} onClick={() => shiftDayForward(d)}>Shift +1h ➡</button>
+                  <button className="btn inline ghost no-export" style={{ fontSize: 11, padding: '2px 6px' }} onClick={() => shiftDayForward(d)}>Shift +1h ➡</button>
                 </div>
                 <table className="schedule-table">
                   <thead>
@@ -1782,7 +1869,6 @@
             out.shifts.forEach(sh => {
               if (sh.day === dayToShift) {
                 sh.startIdx += 1;
-                // Cap at the end of the day bounds
                 if (sh.startIdx + sh.span > HOURS.length) {
                   sh.span = HOURS.length - sh.startIdx;
                 }
@@ -1801,13 +1887,21 @@
 
       const conflictsInfo = useMemo(() => detectConflicts(result), [result]);
 
+      const latestState = useRef({ result, staff, fmpDate, enabledTasks, includeMinus3, includePlus3, dualFullMoonMode });
       useEffect(() => {
-        if (!result || !user) return;
-        const saveToHistory = async () => {
+        latestState.current = { result, staff, fmpDate, enabledTasks, includeMinus3, includePlus3, dualFullMoonMode };
+      }, [result, staff, fmpDate, enabledTasks, includeMinus3, includePlus3, dualFullMoonMode]);
+
+      useEffect(() => {
+        if (!user) return;
+        const interval = setInterval(() => {
+          const current = latestState.current;
+          if (!current.result) return;
+          
           const snapshot = {
-            timestamp: new Date().toISOString(), date: fmpDate, staff: staff,
-            result: result, enabledTasks: enabledTasks, includeMinus3: includeMinus3,
-            includePlus3: includePlus3, dualFullMoonMode: dualFullMoonMode,
+            timestamp: new Date().toISOString(), date: current.fmpDate, staff: current.staff,
+            result: current.result, enabledTasks: current.enabledTasks, includeMinus3: current.includeMinus3,
+            includePlus3: current.includePlus3, dualFullMoonMode: current.dualFullMoonMode,
           };
           
           setScheduleHistory(prev => {
@@ -1815,11 +1909,9 @@
             setDoc(doc(db, "schedules", "history"), { list: newHistory }).catch(e => console.error(e));
             return newHistory;
           });
-        };
-        saveToHistory();
-        const interval = setInterval(saveToHistory, 30000);
+        }, 30000);
         return () => clearInterval(interval);
-      }, [result, staff, fmpDate, enabledTasks, includeMinus3, includePlus3, dualFullMoonMode, user]);
+      }, [user]);
 
       const highlightColors = [
         { bg: '#fef08a', text: '#000', name: 'yellow' }, { bg: '#86efac', text: '#000', name: 'green' },
@@ -2169,57 +2261,61 @@
                 <title>Volunteer Schedule - ${activeTab}</title>
                 <style>
                   * { box-sizing: border-box; -webkit-print-color-adjust: exact !important; color-adjust: exact !important; print-color-adjust: exact !important; }
-                  body { font-family: 'Arial', sans-serif; margin: 15px; font-size: 13px; line-height: 1.1; color: black !important; }
-                  .schedule-stack { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; page-break-before: avoid; page-break-after: avoid; }
-                  .day-block { width: 48%; margin-bottom: 20px; break-inside: avoid; page-break-inside: avoid; display: inline-block; vertical-align: top; }
-                  .day-block:nth-child(2n+1):not(:first-child):not(:nth-child(2)) { page-break-before: always; }
-                  .schedule-table { border-collapse: collapse; width: 100%; margin: 5px 0; page-break-inside: avoid; font-size: 9px; table-layout: fixed; }
-                  .schedule-table th, .schedule-table td { border: 1px solid #000 !important; padding: 2px; text-align: center; font-size: 8px; line-height: 1.0; }
-                  .schedule-table .hour-col { width: calc((100% - 120px) / 11) !important; }
-                  .task-name { text-align: left !important; font-weight: bold; padding-left: 3px !important; font-size: 8px; width: 110px !important; }
-                  .stripe-col { width: 8px !important; }
-                  .day-title { background: #e0e0e0 !important; font-weight: bold; padding: 6px; border-bottom: 2px solid #000 !important; font-size: 11px; }
-                  .people-wrap { display: grid; grid-template-columns: repeat(3, 1fr); grid-gap: 10px; width: 100%; }
-                  .person-card { width: 100%; border: 2px solid #000 !important; break-inside: avoid; page-break-inside: avoid; box-sizing: border-box; display: flex; flex-direction: column; }
-                  .person-card:nth-child(6n+1):not(:first-child) { page-break-before: always; }
-                  .person-head { background: #f0f0f0 !important; font-weight: bold; padding: 6px; border-bottom: 1px solid #000 !important; font-size: 12px; }
-                  .person-table { width: 100%; border-collapse: collapse; flex-grow: 1; }
-                  .person-table th, .person-table td { border: 1px solid #000 !important; padding: 3px; text-align: center; font-size: 10px; }
-                  .list-wrap, div:has(.person-list) { display: grid !important; grid-template-columns: repeat(4, 1fr) !important; width: 100% !important; gap: 4px !important; transform: scale(0.6) !important; transform-origin: top left !important; }
-                  .person-list { width: 100% !important; border: 2px solid #000 !important; break-inside: avoid !important; page-break-inside: avoid !important; box-sizing: border-box !important; display: flex !important; flex-direction: column !important; font-size: 0.75em !important; }
-                  .person-list table { width: 100% !important; font-size: 0.7em !important; }
-                  .person-list:nth-child(12n) { page-break-after: always !important; }
-                  .person-list .head { background: #f0f0f0 !important; font-weight: bold; padding: 6px; border-bottom: 1px solid #000 !important; font-size: 11px; }
-                  .person-list th, .person-list td { border: 1px solid #000 !important; padding: 2px; font-size: 9px; }
-                  .compact-date { font-weight: bold !important; background: #f5f5f5 !important; font-size: 9px; }
-                  td[style*="background-color: #FFF6A2"] { background: #FFF6A2 !important; }
-                  td[style*="background-color: #C5F7C8"] { background: #C5F7C8 !important; }
-                  td[style*="background-color: #CBE5FF"] { background: #CBE5FF !important; }
-                  td[style*="background-color: #BFF7F2"] { background: #BFF7F2 !important; }
-                  td[style*="background-color: #B6EFE6"] { background: #B6EFE6 !important; }
-                  td[style*="background-color: #DCCCFF"] { background: #DCCCFF !important; }
-                  td[style*="background-color: #FFD6E7"] { background: #FFD6E7 !important; }
-                  td[style*="background-color: #FFE1C6"] { background: #FFE1C6 !important; }
-                  td[style*="background-color: #EEEEEE"] { background: #EEEEEE !important; }
-                  .summary-table { border-collapse: collapse; margin: 10px 0; }
-                  .summary-table th, .summary-table td { border: 1px solid #000 !important; padding: 4px; font-size: 11px; }
-                  @media print { 
-                    body { margin: 0; font-size: 12px; }
-                    .person-card, .person-list, .day-block { break-inside: avoid; }
-                    h1, h2 { page-break-after: avoid; }
-                    @page { size: A4 portrait; margin: 0.5in; }
-                    .schedule-stack { page: landscape; }
-                    @page landscape { size: A4 landscape; margin: 0.5in; }
-                  }
+                  body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; margin: 0; padding: 0; font-size: 12px; color: black !important; background: white; }
+                  .no-export { display: none !important; }
+                  
+                  /* Schedule Grid - Full Width A4 Stacked */
+                  .schedule-stack { display: block; width: 100%; }
+                  .day-block { width: 100%; margin-bottom: 40px; page-break-inside: avoid; break-inside: avoid; }
+                  .schedule-table { border-collapse: collapse; width: 100%; margin: 0; font-size: 11px; table-layout: fixed; border: 2px solid #000; }
+                  .schedule-table th, .schedule-table td { border: 1px solid #444 !important; padding: 6px 4px; text-align: center; }
+                  .schedule-table th { background-color: #f0f0f0 !important; font-weight: bold; border-bottom: 2px solid #000 !important; }
+                  .task-name { text-align: left !important; font-weight: bold; padding-left: 8px !important; width: 120px !important; border-right: 2px solid #000 !important; }
+                  .stripe-col { display: none !important; }
+                  .stripe { display: none !important; }
+                  .day-title { background: #e0e0e0 !important; font-weight: bold; padding: 10px; border: 2px solid #000 !important; border-bottom: none !important; font-size: 16px; text-align: center; text-transform: uppercase; }
+                  
+                  /* Clean up cells for pure calendar */
+                  .cell-wrap { min-height: 20px; display: flex; flex-direction: column; justify-content: center; }
+                  .staff-name { padding: 2px; font-weight: 600; font-size: 12px; }
+                  
+                  /* Other tabs (People/List) */
+                  .people-wrap { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+                  .person-card { border: 2px solid #000 !important; break-inside: avoid; page-break-inside: avoid; border-radius: 4px; overflow: hidden; }
+                  .person-head { background: #e0e0e0 !important; font-weight: bold; padding: 8px; border-bottom: 2px solid #000 !important; font-size: 14px; text-align: center; }
+                  .person-table { width: 100%; border-collapse: collapse; }
+                  .person-table th, .person-table td { border: 1px solid #666 !important; padding: 4px; font-size: 10px; text-align: center; }
+                  
+                  .list-wrap, div:has(.person-list) { display: grid !important; grid-template-columns: repeat(4, 1fr) !important; gap: 10px !important; }
+                  .person-list { border: 2px solid #000 !important; break-inside: avoid !important; page-break-inside: avoid !important; border-radius: 4px; overflow: hidden; }
+                  .person-list .head { background: #e0e0e0 !important; font-weight: bold; padding: 6px; border-bottom: 2px solid #000 !important; text-align: center; }
+                  .person-list table { width: 100%; border-collapse: collapse; font-size: 10px; }
+                  .person-list th, .person-list td { border: 1px solid #666 !important; padding: 4px; }
+                  .compact-date { font-weight: bold !important; background: #f5f5f5 !important; }
+                  
+                  /* Summary Tab */
+                  .summary-table { border-collapse: collapse; margin: 10px 0; font-size: 11px; }
+                  .summary-table th, .summary-table td { border: 1px solid #444 !important; padding: 6px; text-align: center; }
+                  .summary-table th { background: #eee !important; border-bottom: 2px solid #000 !important; font-weight: bold; }
+                  
+                  /* Colors */
+                  td[style*="background-color: #FFF6A2"], td[style*="background-color: rgb(255, 246, 162)"] { background: #FFF6A2 !important; }
+                  td[style*="background-color: #C5F7C8"], td[style*="background-color: rgb(197, 247, 200)"] { background: #C5F7C8 !important; }
+                  td[style*="background-color: #CBE5FF"], td[style*="background-color: rgb(203, 229, 255)"] { background: #CBE5FF !important; }
+                  td[style*="background-color: #BFF7F2"], td[style*="background-color: rgb(191, 247, 242)"] { background: #BFF7F2 !important; }
+                  td[style*="background-color: #B6EFE6"], td[style*="background-color: rgb(182, 239, 230)"] { background: #B6EFE6 !important; }
+                  td[style*="background-color: #DCCCFF"], td[style*="background-color: rgb(220, 204, 255)"] { background: #DCCCFF !important; }
+                  td[style*="background-color: #FFD6E7"], td[style*="background-color: rgb(255, 214, 231)"] { background: #FFD6E7 !important; }
+                  td[style*="background-color: #FFE1C6"], td[style*="background-color: rgb(255, 225, 198)"] { background: #FFE1C6 !important; }
+                  td[style*="background-color: #EEEEEE"], td[style*="background-color: rgb(238, 238, 238)"] { background: #EEEEEE !important; }
+                  
+                  @page { size: A4 portrait; margin: 15mm; }
                 </style>
               </head>
               <body>
-                <h1>Full Moon Party Volunteer Schedule - ${fmpDate}</h1>
-                <h2>${activeTab.charAt(0).toUpperCase() + activeTab.slice(1)} View</h2>
+                <h1 style="text-align: center; font-size: 24px; margin-bottom: 5px;">Full Moon Party Volunteer Schedule</h1>
+                <h2 style="text-align: center; font-size: 16px; margin-top: 0; color: #555 !important;">${fmpDate} • ${activeTab.charAt(0).toUpperCase() + activeTab.slice(1)} View</h2>
                 ${printContent}
-                <div style="margin-top: 30px; text-align: center; font-size: 9px; color: #666;">
-                  Generated on ${new Date().toLocaleString()}
-                </div>
               </body>
             </html>
           `);
@@ -2242,6 +2338,10 @@
           document.body.appendChild(loadingMsg);
 
           const stripSpecialistText = (clonedDoc) => {
+            // Hide junk elements (buttons, dashes, empty placeholders)
+            const noExportEls = clonedDoc.querySelectorAll('.no-export');
+            noExportEls.forEach(el => { el.style.display = 'none'; });
+
             const replacements = [];
             for (const s of staff) {
               const parsed = parseStaffName(s);
@@ -2510,7 +2610,7 @@
               <div className="row" style={{ display: "flex", gap: 12, alignItems: "flex-start", paddingTop: 8 }}>
                 <div className="staff-input">
                   <label>Staff (one per line):</label>
-                  <textarea rows={12} value={staffInput} onChange={(e) => setStaffInput(e.target.value)} />
+                  <StaffEditor value={staffInput} onChange={setStaffInput} />
                   <div style={{ fontSize: 11, color: "#666", marginTop: 4, lineHeight: 1.3 }}>💡 Specialist format: Name: Task %</div>
                 </div>
                 <div className="actions">
