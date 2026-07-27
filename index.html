@@ -115,8 +115,14 @@
     .compact-date { white-space:nowrap; font-weight:700; font-size:13px; text-align:center; }
     .compact-date small { display:block; font-weight:600; font-size:12px; color:#444 }
 
-    @media (max-width:900px){ .person-list{width:100%} }
+    .insight-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+    .insight-card { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); display: flex; flex-direction: column; gap: 10px; }
+    .insight-msg { font-size: 15px; font-weight: 700; line-height: 1.3;}
+    .insight-sub { font-size: 13px; color: #666; }
 
+    @media (max-width:900px){ .person-list{width:100%} .insight-grid{grid-template-columns: 1fr} }
+
+    /* Print Specific Styling */
     @media print {
       .app-wrap, .controls, .tabbar-wrap, .undo-redo, .print-actions, .conflict-wrap { display:none !important; }
       body > *:not(#app-content-to-print) { display:none; }
@@ -544,8 +550,7 @@
           progressed = false;
           const availableStaff = staff.filter(p => dayHours[day][p] < 9 && !parseStaffName(p).isSpecialist);
           
-          // CRITICAL FIX: Sort by WEEKLY hours first, then daily hours! 
-          // This prevents the engine from overloading people who already have high hours.
+          // Sort by WEEKLY hours first, then daily hours to maintain balance!
           availableStaff.sort((a, b) => {
             if (weeklyHours[a] !== weeklyHours[b]) return weeklyHours[a] - weeklyHours[b];
             return dayHours[day][a] - dayHours[day][b];
@@ -629,7 +634,6 @@
         }
       }
 
-      // --- ASSEMBLE FINAL RESULTS ---
       const byDay = {};
       for (const d of activeDays) {
         byDay[d] = {};
@@ -662,7 +666,6 @@
         if (!byDay[d]['Floater']) byDay[d]['Floater'] = [];
       }
 
-      // Weekly totals are already calculated accurately via the swaps, but we rebuild them to match the output payload format cleanly
       const finalWeeklyTotals = Object.fromEntries(staff.map((s) => [s, 0]));
       const finalByTaskTotals = Object.fromEntries(staff.map((s) => [s, {}]));
       const finalByDayTotals = Object.fromEntries(staff.map((s) => [s, Object.fromEntries(activeDays.map((d) => [d, 0]))]));
@@ -1486,7 +1489,6 @@
               });
             }
             
-            // If the day is completely empty and we are in compact view, hide the entire day box
             if (isCompactView && dayTasks.length === 0) return null;
 
             return (
@@ -1742,6 +1744,196 @@
       );
     }
 
+    function InsightsPanel({ staff, result, setResult, onPushUndo }) {
+      const insights = useMemo(() => {
+        if (!result) return { hourBalancing: [], taskBalancing: [] };
+        const hourBalancing = [];
+        const taskBalancing = [];
+
+        function checkSwapValid(person, newShift, oldShift) {
+          if (!person) return false;
+          const parsed = parseStaffName(person);
+          if (parsed.isSpecialist && parsed.percentage >= 100) return false; 
+
+          let currentDayHours = result.byDayTotals[person]?.[newShift.day] || 0;
+          if (oldShift && oldShift.day === newShift.day) currentDayHours -= oldShift.span;
+          if (currentDayHours + newShift.span > 9) return false;
+
+          const busyHours = new Set();
+          for (const sh of result.shifts) {
+            if (sh.id === oldShift?.id) continue;
+            if (sh.day === newShift.day && sh.assigned.includes(person)) {
+              for (let h = sh.startIdx; h < sh.startIdx + sh.span; h++) busyHours.add(h);
+            }
+          }
+          for (let h = newShift.startIdx; h < newShift.startIdx + newShift.span; h++) {
+            if (busyHours.has(h)) return false;
+          }
+          
+          if (!parsed.isSpecialist || parsed.percentage < 70) {
+            let hasB2B = false;
+            for (const sh of result.shifts) {
+              if (sh.id === oldShift?.id) continue;
+              if (sh.day === newShift.day && sh.assigned.includes(person) && sh.task === newShift.task) {
+                if (sh.startIdx + sh.span === newShift.startIdx) hasB2B = true;
+                if (sh.startIdx === newShift.startIdx + newShift.span) hasB2B = true;
+              }
+            }
+            if (hasB2B) return false;
+          }
+          return true;
+        }
+
+        const regStaff = staff.filter(p => !parseStaffName(p).isSpecialist);
+        const weeklyVals = regStaff.map(p => result.weeklyTotals[p] || 0).sort((a,b)=>a-b);
+        const median = weeklyVals[Math.floor(weeklyVals.length/2)] || 0;
+
+        const overworked = regStaff.filter(p => (result.weeklyTotals[p]||0) > median + 1).sort((a,b) => result.weeklyTotals[b] - result.weeklyTotals[a]);
+        const underworked = regStaff.filter(p => (result.weeklyTotals[p]||0) < median - 1).sort((a,b) => result.weeklyTotals[a] - result.weeklyTotals[b]);
+
+        const maxSuggestions = 6;
+        
+        for (const over of overworked) {
+          if (hourBalancing.length >= maxSuggestions) break;
+          for (const under of underworked) {
+             const overShifts = result.shifts.filter(s => s.assigned.includes(over));
+             const underShifts = result.shifts.filter(s => s.assigned.includes(under));
+
+             for (const oSh of overShifts) {
+               if (checkSwapValid(under, oSh, null)) {
+                  hourBalancing.push({
+                     id: `reassign-${over}-${under}-${oSh.id}`,
+                     type: 'reassign', over, under, oSh, uSh: null, diff: oSh.span,
+                     msg: `Give ${over}'s ${oSh.span}h ${oSh.task} (${oSh.day}) to ${under}`,
+                     sub: `${over} drops to ${(result.weeklyTotals[over]||0) - oSh.span}h | ${under} rises to ${(result.weeklyTotals[under]||0) + oSh.span}h`
+                  });
+               }
+             }
+
+             for (const oSh of overShifts) {
+               for (const uSh of underShifts) {
+                 const diff = oSh.span - uSh.span;
+                 if (diff > 0 && diff <= 3) {
+                    if (checkSwapValid(under, oSh, uSh) && checkSwapValid(over, uSh, oSh)) {
+                       hourBalancing.push({
+                         id: `swap-${over}-${under}-${oSh.id}-${uSh.id}`,
+                         type: 'swap', over, under, oSh, uSh, diff,
+                         msg: `Swap ${over}'s ${oSh.span}h ${oSh.task} (${oSh.day}) with ${under}'s ${uSh.span}h ${uSh.task} (${uSh.day})`,
+                         sub: `${over} drops to ${(result.weeklyTotals[over]||0) - diff}h | ${under} rises to ${(result.weeklyTotals[under]||0) + diff}h`
+                       });
+                    }
+                 }
+               }
+             }
+          }
+        }
+
+        const promoRich = [...regStaff].sort((a,b) => {
+           const aPromo = (result.byTaskTotals[a]?.["Promo Gate"]||0) + (result.byTaskTotals[a]?.["Promo Out"]||0) + (result.byTaskTotals[a]?.["Promo In"]||0);
+           const bPromo = (result.byTaskTotals[b]?.["Promo Gate"]||0) + (result.byTaskTotals[b]?.["Promo Out"]||0) + (result.byTaskTotals[b]?.["Promo In"]||0);
+           return bPromo - aPromo;
+        });
+        
+        if (promoRich.length > 1) {
+           const overPromo = promoRich[0];
+           const underPromo = promoRich[promoRich.length - 1];
+           const oPromoHours = (result.byTaskTotals[overPromo]?.["Promo Gate"]||0) + (result.byTaskTotals[overPromo]?.["Promo Out"]||0) + (result.byTaskTotals[overPromo]?.["Promo In"]||0);
+           const uPromoHours = (result.byTaskTotals[underPromo]?.["Promo Gate"]||0) + (result.byTaskTotals[underPromo]?.["Promo Out"]||0) + (result.byTaskTotals[underPromo]?.["Promo In"]||0);
+           
+           if (oPromoHours - uPromoHours >= 3) {
+             const overShifts = result.shifts.filter(s => s.assigned.includes(overPromo) && s.task.includes("Promo"));
+             const underShifts = result.shifts.filter(s => s.assigned.includes(underPromo) && !s.task.includes("Promo"));
+             
+             for (const oSh of overShifts) {
+                if (taskBalancing.length >= maxSuggestions) break;
+                for (const uSh of underShifts) {
+                   if (oSh.span === uSh.span && checkSwapValid(underPromo, oSh, uSh) && checkSwapValid(overPromo, uSh, oSh)) {
+                       taskBalancing.push({
+                           id: `task-${overPromo}-${underPromo}-${oSh.id}-${uSh.id}`,
+                           type: 'swap', over: overPromo, under: underPromo, oSh, uSh, diff: 0,
+                           msg: `Task Swap: ${overPromo}'s ${oSh.task} (${oSh.day}) with ${underPromo}'s ${uSh.task} (${uSh.day})`,
+                           sub: `Flattens Promo distribution between ${overPromo} and ${underPromo}`
+                       });
+                   }
+                }
+             }
+           }
+        }
+
+        const uniqueHours = Array.from(new Map(hourBalancing.map(item => [item.id, item])).values()).sort((a, b) => b.diff - a.diff).slice(0, 6);
+        const uniqueTasks = Array.from(new Map(taskBalancing.map(item => [item.id, item])).values()).slice(0, 4);
+
+        return { hourBalancing: uniqueHours, taskBalancing: uniqueTasks };
+      }, [staff, result]);
+
+      function executeInsightSwap(swap) {
+        onPushUndo(result);
+        setResult(prev => {
+          const out = deepClone(prev);
+          const oSh = out.shifts.find(s => s.id === swap.oSh.id);
+          
+          if (swap.type === 'reassign') {
+             oSh.assigned = oSh.assigned.filter(p => p !== swap.over);
+             oSh.assigned.push(swap.under);
+          } else if (swap.type === 'swap') {
+             const uSh = out.shifts.find(s => s.id === swap.uSh.id);
+             oSh.assigned = oSh.assigned.filter(p => p !== swap.over);
+             oSh.assigned.push(swap.under);
+             uSh.assigned = uSh.assigned.filter(p => p !== swap.under);
+             uSh.assigned.push(swap.over);
+          }
+          return recomputeSummaries(out);
+        });
+      }
+
+      if (!result) return null;
+
+      return (
+        <div style={{ marginTop: 16 }}>
+          {insights.hourBalancing.length === 0 && insights.taskBalancing.length === 0 && (
+            <div style={{ padding: 24, textAlign: 'center', background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0', color: '#166534' }}>
+              <h3 style={{ margin: '0 0 8px 0' }}>✨ Schedule looks optimal!</h3>
+              <p style={{ margin: 0 }}>No major hour or task discrepancies found.</p>
+            </div>
+          )}
+
+          {insights.hourBalancing.length > 0 && (
+            <div style={{ marginBottom: 32 }}>
+              <h3 style={{ fontSize: 18, borderBottom: '2px solid var(--pink)', display: 'inline-block', paddingBottom: 4 }}>⚖️ Top Fixes for Hour Imbalances</h3>
+              <div className="insight-grid">
+                {insights.hourBalancing.map(swap => (
+                  <div key={swap.id} className="insight-card">
+                    <div>
+                      <div className="insight-msg">{swap.msg}</div>
+                      <div className="insight-sub">{swap.sub}</div>
+                    </div>
+                    <button className="btn small" style={{ width: '100%' }} onClick={() => executeInsightSwap(swap)}>Execute 1-Click Swap</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {insights.taskBalancing.length > 0 && (
+            <div>
+              <h3 style={{ fontSize: 18, borderBottom: '2px solid var(--pink)', display: 'inline-block', paddingBottom: 4 }}>🎯 Top Fixes for Task Variety (Promo)</h3>
+              <div className="insight-grid">
+                {insights.taskBalancing.map(swap => (
+                  <div key={swap.id} className="insight-card">
+                    <div>
+                      <div className="insight-msg">{swap.msg}</div>
+                      <div className="insight-sub">{swap.sub}</div>
+                    </div>
+                    <button className="btn small" style={{ width: '100%' }} onClick={() => executeInsightSwap(swap)}>Execute 1-Click Swap</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     function App() {
       const [user, setUser] = useState(null);
       const [dialog, setDialog] = useState(null);
@@ -1769,9 +1961,6 @@
       const [highlightedNames, setHighlightedNames] = useState({});
       const [selectedStaff, setSelectedStaff] = useState(null);
       const [showStaffPanel, setShowStaffPanel] = useState(false);
-      const [showSwapAssistant, setShowSwapAssistant] = useState(false);
-      const [swapMode, setSwapMode] = useState('hours');
-      const [swapConfig, setSwapConfig] = useState({ reduceHours: [], increaseHours: [], person: null, task: null, replacements: [] });
 
       const [enabledTasks, setEnabledTasks] = useState({
         "Runner": true, "Social Media": true, "Promo Out": true, "Promo In": true,
@@ -1958,169 +2147,6 @@
       function showStaffInfo(staffName) {
         setSelectedStaff(staffName);
         setShowStaffPanel(true);
-      }
-
-      function handleFindBestHourSwap() {
-        if (!result || !result.shifts) return;
-        const overworked = swapConfig.reduceHours;
-        const underworked = swapConfig.increaseHours;
-        if (overworked.length === 0 || underworked.length === 0) return showAlert('Please select staff for both "too many hours" and "too few hours"');
-        
-        const getBusyHours = (person, day, excludeShiftId = null) => {
-          const busy = new Set();
-          for (const sh of result.shifts) {
-            if (sh.id === excludeShiftId) continue;
-            if (sh.day === day && sh.assigned.includes(person)) {
-              for (let h = sh.startIdx; h < sh.startIdx + sh.span; h++) busy.add(h);
-            }
-          }
-          return busy;
-        };
-        
-        const canTakeShift = (person, shift, excludeShiftId = null) => {
-          const busy = getBusyHours(person, shift.day, excludeShiftId);
-          for (let h = shift.startIdx; h < shift.startIdx + shift.span; h++) if (busy.has(h)) return false;
-          let currentDayHours = result.byDayTotals?.[person]?.[shift.day] || 0;
-          if (excludeShiftId) {
-            const excludedShift = result.shifts.find(s => s.id === excludeShiftId);
-            if (excludedShift && excludedShift.day === shift.day) currentDayHours -= excludedShift.span;
-          }
-          if (currentDayHours + shift.span > 9) return false;
-          return true;
-        };
-        
-        const overworkedShifts = result.shifts.filter(sh => overworked.some(p => sh.assigned.includes(p))).sort((a, b) => b.span - a.span);
-        const underworkedShifts = result.shifts.filter(sh => underworked.some(p => sh.assigned.includes(p))).sort((a, b) => a.span - b.span);
-        
-        const suggestions = [];
-        for (const longShift of overworkedShifts) {
-          const overworkedPerson = longShift.assigned.find(p => overworked.includes(p));
-          if (!overworkedPerson) continue;
-          for (const shortShift of underworkedShifts) {
-            if (longShift.id === shortShift.id) continue;
-            const underworkedPerson = shortShift.assigned.find(p => underworked.includes(p));
-            if (!underworkedPerson || overworkedPerson === underworkedPerson) continue;
-            
-            const hoursDiff = longShift.span - shortShift.span;
-            const overworkedCanTakeShort = canTakeShift(overworkedPerson, shortShift, longShift.id);
-            const underworkedCanTakeLong = canTakeShift(underworkedPerson, longShift, shortShift.id);
-            
-            if (overworkedCanTakeShort && underworkedCanTakeLong && hoursDiff !== 0) {
-              suggestions.push({
-                type: 'hour_swap', from: overworkedPerson, to: underworkedPerson,
-                fromShift: longShift, toShift: shortShift, hoursDiff: Math.abs(hoursDiff),
-                description: hoursDiff > 0 
-                  ? `Swap ${overworkedPerson}'s ${longShift.span}h ${longShift.task} (${longShift.day}) with ${underworkedPerson}'s ${shortShift.span}h ${shortShift.task} (${shortShift.day}) → ${overworkedPerson} loses ${hoursDiff}h, ${underworkedPerson} gains ${hoursDiff}h`
-                  : `Swap ${overworkedPerson}'s ${longShift.span}h ${longShift.task} (${longShift.day}) with ${underworkedPerson}'s ${shortShift.span}h ${shortShift.task} (${shortShift.day}) → ${underworkedPerson} loses ${Math.abs(hoursDiff)}h, ${overworkedPerson} gains ${Math.abs(hoursDiff)}h`
-              });
-            }
-          }
-        }
-        
-        if (suggestions.length === 0) {
-          for (const shift of overworkedShifts) {
-            const overworkedPerson = shift.assigned.find(p => overworked.includes(p));
-            if (!overworkedPerson) continue;
-            for (const underworkedPerson of underworked) {
-              if (overworkedPerson === underworkedPerson) continue;
-              if (canTakeShift(underworkedPerson, shift, null)) {
-                suggestions.push({
-                  type: 'reassign', from: overworkedPerson, to: underworkedPerson,
-                  fromShift: shift, toShift: null, hoursDiff: shift.span,
-                  description: `Give ${overworkedPerson}'s ${shift.span}h ${shift.task} shift (${shift.day}) to ${underworkedPerson} → ${overworkedPerson} loses ${shift.span}h, ${underworkedPerson} gains ${shift.span}h`
-                });
-              }
-            }
-          }
-        }
-        
-        if (suggestions.length === 0) return showAlert('No valid swaps found. The selected people may not have compatible shifts that can be exchanged without conflicts.');
-        
-        suggestions.sort((a, b) => b.hoursDiff - a.hoursDiff);
-        const best = suggestions[0];
-        const confirmMsg = `Found ${suggestions.length} possible swap(s).\n\nBest swap:\n${best.description}\n\nExecute this swap?`;
-        showConfirm(confirmMsg, () => executeShiftSwap(best.from, best.to, best.fromShift, best.toShift));
-      }
-
-      function handleFindBestTaskSwap() {
-        if (!result || !result.shifts) return;
-        let task = swapConfig.task;
-        const overloadedPerson = swapConfig.person;
-        const candidates = swapConfig.replacements;
-        if (!task || !overloadedPerson || candidates.length === 0) return showAlert('Please select a task, person with too much of it, and candidates to take shifts');
-        
-        const getRelatedTasks = (t) => (t === 'Promo Out' || t === 'Promo Gate') ? ['Promo Out', 'Promo Gate'] : [t];
-        const relatedTasks = getRelatedTasks(task);
-        
-        const getBusyHours = (person, day) => {
-          const busy = new Set();
-          for (const sh of result.shifts) {
-            if (sh.day === day && sh.assigned.includes(person)) {
-              for (let h = sh.startIdx; h < sh.startIdx + sh.span; h++) busy.add(h);
-            }
-          }
-          return busy;
-        };
-        
-        const canTakeShift = (person, shift) => {
-          const busy = getBusyHours(person, shift.day);
-          for (let h = shift.startIdx; h < shift.startIdx + shift.span; h++) if (busy.has(h)) return false;
-          const currentDayHours = result.byDayTotals?.[person]?.[shift.day] || 0;
-          if (currentDayHours + shift.span > 9) return false;
-          return true;
-        };
-        
-        const overloadedShifts = result.shifts.filter(sh => relatedTasks.includes(sh.task) && sh.assigned.includes(overloadedPerson));
-        if (overloadedShifts.length === 0) {
-          const taskLabel = relatedTasks.length > 1 ? relatedTasks.join('/') : task;
-          return showAlert(`${overloadedPerson} doesn't have any ${taskLabel} shifts to reassign.`);
-        }
-        
-        const suggestions = [];
-        for (const shift of overloadedShifts) {
-          for (const candidate of candidates) {
-            if (canTakeShift(candidate, shift)) {
-              suggestions.push({
-                type: 'task_swap', from: overloadedPerson, to: candidate, shift: shift,
-                description: `Give ${overloadedPerson}'s ${shift.span}h ${shift.task} shift on ${shift.day} to ${candidate}`
-              });
-            }
-          }
-        }
-        
-        if (suggestions.length === 0) return showAlert(`No valid reassignments found. The candidates may all have conflicts during ${overloadedPerson}'s ${task} shifts.`);
-        
-        const best = suggestions[0];
-        const confirmMsg = `Found ${suggestions.length} possible reassignment(s).\n\nBest option:\n${best.description}\n\nExecute this change?`;
-        showConfirm(confirmMsg, () => executeTaskReassign(best.from, best.to, best.shift));
-      }
-
-      function executeShiftSwap(person1, person2, shift1, shift2) {
-        pushUndo(result);
-        setResult(prev => {
-          const out = deepClone(prev);
-          const s1 = out.shifts.find(s => s.id === shift1.id);
-          if (s1) { s1.assigned = s1.assigned.filter(p => p !== person1); s1.assigned.push(person2); }
-          if (shift2) {
-            const s2 = out.shifts.find(s => s.id === shift2.id);
-            if (s2) { s2.assigned = s2.assigned.filter(p => p !== person2); s2.assigned.push(person1); }
-          }
-          return recomputeSummaries(out);
-        });
-        setShowSwapAssistant(false);
-        setSwapConfig({ reduceHours: [], increaseHours: [], person: null, task: null, replacements: [] });
-      }
-
-      function executeTaskReassign(fromPerson, toPerson, shift) {
-        pushUndo(result);
-        setResult(prev => {
-          const out = deepClone(prev);
-          const s = out.shifts.find(s => s.id === shift.id);
-          if (s) { s.assigned = s.assigned.filter(p => p !== fromPerson); s.assigned.push(toPerson); }
-          return recomputeSummaries(out);
-        });
-        setShowSwapAssistant(false);
-        setSwapConfig({ reduceHours: [], increaseHours: [], person: null, task: null, replacements: [] });
       }
 
       const renameAndRefreshStaff = (newStaffInput) => { setStaffInput(newStaffInput); };
@@ -2338,7 +2364,6 @@
           document.body.appendChild(loadingMsg);
 
           const stripSpecialistText = (clonedDoc) => {
-            // Hide junk elements (buttons, dashes, empty placeholders)
             const noExportEls = clonedDoc.querySelectorAll('.no-export');
             noExportEls.forEach(el => { el.style.display = 'none'; });
 
@@ -2539,40 +2564,6 @@
 
       function onPushUndo(prevState) { pushUndo(prevState); }
 
-      function smartFixAuto() {
-        if (!result) return;
-        pushUndo(result);
-        const out = deepClone(result);
-        const conflicts = detectConflicts(out);
-        for (const msg of conflicts.list) {
-          if (msg.startsWith("Double-booked:")) {
-            const m = msg.match(/^Double-booked: ([^\s]+) on ([^\s]+) at ([^\s]+) /);
-            if (!m) continue;
-            const name = m[1], day = m[2], hourLabel = m[3];
-            const hourIdx = HOUR_INDEX[hourLabel];
-            if (hourIdx === undefined) continue;
-            const personShifts = out.shifts.filter((s) => s.day === day && s.assigned.includes(name) && s.startIdx <= hourIdx && s.startIdx + s.span > hourIdx);
-            if (personShifts.length > 1) {
-              personShifts.sort((a, b) => {
-                const pa = PRIORITY.indexOf(a.task), pb = PRIORITY.indexOf(b.task);
-                if (pa !== pb) return (pa === -1 ? 99 : pa) - (pb === -1 ? 99 : pb);
-                if (a.startIdx !== b.startIdx) return b.startIdx - a.startIdx;
-                return b.span - a.span;
-              });
-              const shiftToRemove = personShifts[0];
-              shiftToRemove.assigned = shiftToRemove.assigned.filter((n) => n !== name);
-            }
-          }
-        }
-        setResult(recomputeSummaries(out));
-      }
-
-      function smartFixRebalance() {
-        if (!staff.length) return;
-        pushUndo(result);
-        setResult(generateAssignments(staff, includeMinus3, includePlus3, dualFullMoonMode, enabledTasks));
-      }
-
       return (
         <div className="app-wrap">
           <CustomDialog dialog={dialog} onClose={() => setDialog(null)} />
@@ -2637,7 +2628,7 @@
               <div className={`tab ${activeTab === "people" ? "active" : ""}`} onClick={() => setActiveTab("people")}>Individual Cards</div>
               <div className={`tab ${activeTab === "list" ? "active" : ""}`} onClick={() => setActiveTab("list")}>Individual List</div>
               <div className={`tab ${activeTab === "summaries" ? "active" : ""}`} onClick={() => setActiveTab("summaries")}>Summaries</div>
-              {result && (<button className="btn small" onClick={() => setShowSwapAssistant(true)} style={{ marginLeft: 'auto' }}>🔄 Smart Swap</button>)}
+              {result && (<div className={`tab ${activeTab === "insights" ? "active" : ""}`} onClick={() => setActiveTab("insights")}>💡 Insights</div>)}
             </div>
             <div className="undo-redo">
               <button className="btn inline" onClick={undo}>Undo</button>
@@ -2666,13 +2657,7 @@
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}><div style={{ width: 16, height: 10, background: "var(--conf-purple)" }}></div> &gt;9 hrs/day</div>
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}><div style={{ width: 16, height: 10, background: "var(--conf-blue)" }}></div> Uneven task distribution</div>
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}><div style={{ width: 16, height: 10, background: "var(--conf-deepred)" }}></div> +3 hrs above weekly avg</div>
-                    <div style={{ marginLeft: 12, display: "flex", gap: 8, alignItems: "center" }}>
-                      <div style={{ fontWeight: 700 }}>Smart Fixes:</div>
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <button className="btn small" onClick={smartFixAuto}>A) Auto attempt (safe)</button>
-                        <button className="btn small" onClick={smartFixRebalance}>B) Rebalance (regenerate)</button>
-                      </div>
-                    </div>
+                    
                     {Object.keys(highlightedNames).length > 0 && (
                       <div style={{ marginLeft: 12 }}>
                         <button className="btn small" onClick={clearAllHighlights} style={{ background: '#6b7280', borderColor: '#6b7280' }}>Clear {Object.keys(highlightedNames).length} Highlights</button>
@@ -2695,6 +2680,10 @@
 
             {result && activeTab === "summaries" && (
               <div id="summaries"><Summaries staff={staff} weeklyTotals={result.weeklyTotals} byTaskTotals={result.byTaskTotals} byDayTotals={result.byDayTotals} activeDays={result.activeDays} dayHeader={dayHeader} /></div>
+            )}
+
+            {result && activeTab === "insights" && (
+              <div id="insights"><InsightsPanel staff={staff} result={result} setResult={setResult} onPushUndo={onPushUndo} /></div>
             )}
 
             {result && conflictsInfo.list && conflictsInfo.list.length > 0 && (
@@ -2826,70 +2815,6 @@
                 </div>
               </div>
             )}
-
-            {showSwapAssistant && result && (
-              <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
-                <div style={{ backgroundColor: 'white', padding: 24, borderRadius: 8, maxWidth: 700, maxHeight: '80vh', overflow: 'auto', boxShadow: '0 4px 20px rgba(0,0,0,0.3)' }}>
-                  <h2 style={{ marginTop: 0 }}>🔄 Smart Swap Assistant</h2>
-                  <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-                    <button className={`btn small ${swapMode === 'hours' ? '' : 'secondary'}`} onClick={() => setSwapMode('hours')}>Hour Balancer</button>
-                    <button className={`btn small ${swapMode === 'tasks' ? '' : 'secondary'}`} onClick={() => setSwapMode('tasks')}>Task Balancer</button>
-                  </div>
-                  
-                  {swapMode === 'hours' ? (
-                    <div>
-                      <h3 style={{ fontSize: 16, marginBottom: 12 }}>Balance Hours</h3>
-                      <div style={{ marginBottom: 16 }}>
-                        <label style={{ display: 'block', fontWeight: 600, marginBottom: 6 }}>Who needs LESS hours?</label>
-                        <select multiple size={5} value={swapConfig.reduceHours} onChange={(e) => setSwapConfig({...swapConfig, reduceHours: Array.from(e.target.selectedOptions, option => option.value)})} style={{ width: '100%', padding: 6 }}>
-                          {staff.map(s => (<option key={s} value={s}>{s} ({result.weeklyTotals?.[s] || 0}h)</option>))}
-                        </select>
-                      </div>
-                      <div style={{ marginBottom: 16 }}>
-                        <label style={{ display: 'block', fontWeight: 600, marginBottom: 6 }}>Who needs MORE hours?</label>
-                        <select multiple size={5} value={swapConfig.increaseHours} onChange={(e) => setSwapConfig({...swapConfig, increaseHours: Array.from(e.target.selectedOptions, option => option.value)})} style={{ width: '100%', padding: 6 }}>
-                          {staff.map(s => (<option key={s} value={s}>{s} ({result.weeklyTotals?.[s] || 0}h)</option>))}
-                        </select>
-                      </div>
-                    </div>
-                  ) : (
-                    <div>
-                      <h3 style={{ fontSize: 16, marginBottom: 12 }}>Balance Tasks</h3>
-                      <div style={{ marginBottom: 16 }}>
-                        <label style={{ display: 'block', fontWeight: 600, marginBottom: 6 }}>Which task needs balancing?</label>
-                        <select value={swapConfig.task || ''} onChange={(e) => setSwapConfig({...swapConfig, task: e.target.value, person: null, replacements: []})} style={{ width: '100%', padding: 8 }}>
-                          <option value="">Select task...</option>
-                          {Object.keys(LIMITS).map(t => (<option key={t} value={t}>{t}</option>))}
-                        </select>
-                      </div>
-                      {swapConfig.task && (
-                        <div style={{ marginBottom: 16 }}>
-                          <label style={{ display: 'block', fontWeight: 600, marginBottom: 6 }}>Who has too much {swapConfig.task}?</label>
-                          <select value={swapConfig.person || ''} onChange={(e) => setSwapConfig({...swapConfig, person: e.target.value, replacements: []})} style={{ width: '100%', padding: 8 }}>
-                            <option value="">Select person...</option>
-                            {staff.map(s => (<option key={s} value={s}>{s}</option>))}
-                          </select>
-                        </div>
-                      )}
-                      {swapConfig.person && swapConfig.task && (
-                        <div style={{ marginBottom: 16 }}>
-                          <label style={{ display: 'block', fontWeight: 600, marginBottom: 6 }}>Who could take some {swapConfig.task} shifts?</label>
-                          <select multiple size={5} value={swapConfig.replacements} onChange={(e) => setSwapConfig({...swapConfig, replacements: Array.from(e.target.selectedOptions, option => option.value)})} style={{ width: '100%', padding: 6 }}>
-                            {staff.filter(s => s !== swapConfig.person).map(s => (<option key={s} value={s}>{s}</option>))}
-                          </select>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 16 }}>
-                    <button className="btn secondary" onClick={() => { setShowSwapAssistant(false); setSwapConfig({ reduceHours: [], increaseHours: [], person: null, task: null, replacements: [] }); }}>Close</button>
-                    <button className="btn" disabled={(swapMode === 'hours' && (swapConfig.reduceHours.length === 0 || swapConfig.increaseHours.length === 0)) || (swapMode === 'tasks' && (!swapConfig.person || !swapConfig.task || swapConfig.replacements.length === 0))} onClick={() => swapMode === 'hours' ? handleFindBestHourSwap() : handleFindBestTaskSwap()}>Find Best Swaps</button>
-                  </div>
-                </div>
-              </div>
-            )}
-
           </div>
         </div>
       );
