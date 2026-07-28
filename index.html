@@ -2259,207 +2259,63 @@
         });
       }
 
-      function handlePrint() {
-        try {
-          let printContent = '';
-          if (activeTab === 'schedule') {
-            const scheduleTables = document.querySelector('.schedule-stack');
-            if (scheduleTables) printContent = scheduleTables.outerHTML;
-            else return showAlert("No schedule content to print");
-          } else {
-            const tabContent = document.getElementById(activeTab);
-            if (tabContent) printContent = tabContent.innerHTML;
-            else return showAlert("No content available for printing");
-          }
+      function handleScheduleDayExports(scheduleElement, stripSpecialistText) {
+        return new Promise((resolve) => {
+          const dayBlocks = scheduleElement.querySelectorAll('.day-block');
+          if (dayBlocks.length === 0) { resolve(); return; }
           
-          for (const s of staff) {
-            const parsed = parseStaffName(s);
-            if (parsed.isSpecialist) {
-              const escaped = s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              printContent = printContent.replace(new RegExp(escaped, 'g'), parsed.displayName);
-            }
-          }
+          let exportCount = 0;
+          const totalDays = dayBlocks.length;
           
-          const printWindow = window.open('', '_blank', 'width=1200,height=900');
-          printWindow.document.write(`
-            <html>
-              <head>
-                <title>Volunteer Schedule - ${activeTab}</title>
-                <style>
-                  * { box-sizing: border-box; -webkit-print-color-adjust: exact !important; color-adjust: exact !important; print-color-adjust: exact !important; }
-                  body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; margin: 0; padding: 0; font-size: 12px; color: black !important; background: white; }
-                  .no-export { display: none !important; }
-                  
-                  /* Schedule Grid - Full Width A4 Stacked */
-                  .schedule-stack { display: block; width: 100%; }
-                  .day-block { width: 100%; margin-bottom: 40px; page-break-inside: avoid; break-inside: avoid; }
-                  .schedule-table { border-collapse: collapse; width: 100%; margin: 0; font-size: 11px; table-layout: fixed; border: 2px solid #000; }
-                  .schedule-table th, .schedule-table td { border: 1px solid #444 !important; padding: 6px 4px; text-align: center; }
-                  .schedule-table th { background-color: #f0f0f0 !important; font-weight: bold; border-bottom: 2px solid #000 !important; }
-                  .task-name { text-align: left !important; font-weight: bold; padding-left: 8px !important; width: 120px !important; border-right: 2px solid #000 !important; }
-                  .stripe-col { display: none !important; }
-                  .stripe { display: none !important; }
-                  .day-title { background: #e0e0e0 !important; font-weight: bold; padding: 10px; border: 2px solid #000 !important; border-bottom: none !important; font-size: 16px; text-align: center; text-transform: uppercase; }
-                  
-                  /* Clean up cells for pure calendar */
-                  .cell-wrap { min-height: 20px; display: flex; flex-direction: column; justify-content: center; }
-                  .staff-name { padding: 2px; font-weight: 600; font-size: 12px; }
-                  
-                  /* Other tabs (People/List) */
-                  .people-wrap { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
-                  .person-card { border: 2px solid #000 !important; break-inside: avoid; page-break-inside: avoid; border-radius: 4px; overflow: hidden; }
-                  .person-head { background: #e0e0e0 !important; font-weight: bold; padding: 8px; border-bottom: 2px solid #000 !important; font-size: 14px; text-align: center; }
-                  .person-table { width: 100%; border-collapse: collapse; }
-                  .person-table th, .person-table td { border: 1px solid #666 !important; padding: 4px; font-size: 10px; text-align: center; }
-                  
-                  .list-wrap, div:has(.person-list) { display: grid !important; grid-template-columns: repeat(4, 1fr) !important; gap: 10px !important; }
-                  .person-list { border: 2px solid #000 !important; break-inside: avoid !important; page-break-inside: avoid !important; border-radius: 4px; overflow: hidden; }
-                  .person-list .head { background: #e0e0e0 !important; font-weight: bold; padding: 6px; border-bottom: 2px solid #000 !important; text-align: center; }
-                  .person-list table { width: 100%; border-collapse: collapse; font-size: 10px; }
-                  .person-list th, .person-list td { border: 1px solid #666 !important; padding: 4px; }
-                  .compact-date { font-weight: bold !important; background: #f5f5f5 !important; }
-                  
-                  /* Summary Tab */
-                  .summary-table { border-collapse: collapse; margin: 10px 0; font-size: 11px; }
-                  .summary-table th, .summary-table td { border: 1px solid #444 !important; padding: 6px; text-align: center; }
-                  .summary-table th { background: #eee !important; border-bottom: 2px solid #000 !important; font-weight: bold; }
-                  
-                  /* Colors */
-                  td[style*="background-color: #FFF6A2"], td[style*="background-color: rgb(255, 246, 162)"] { background: #FFF6A2 !important; }
-                  td[style*="background-color: #C5F7C8"], td[style*="background-color: rgb(197, 247, 200)"] { background: #C5F7C8 !important; }
-                  td[style*="background-color: #CBE5FF"], td[style*="background-color: rgb(203, 229, 255)"] { background: #CBE5FF !important; }
-                  td[style*="background-color: #BFF7F2"], td[style*="background-color: rgb(191, 247, 242)"] { background: #BFF7F2 !important; }
-                  td[style*="background-color: #B6EFE6"], td[style*="background-color: rgb(182, 239, 230)"] { background: #B6EFE6 !important; }
-                  td[style*="background-color: #DCCCFF"], td[style*="background-color: rgb(220, 204, 255)"] { background: #DCCCFF !important; }
-                  td[style*="background-color: #FFD6E7"], td[style*="background-color: rgb(255, 214, 231)"] { background: #FFD6E7 !important; }
-                  td[style*="background-color: #FFE1C6"], td[style*="background-color: rgb(255, 225, 198)"] { background: #FFE1C6 !important; }
-                  td[style*="background-color: #EEEEEE"], td[style*="background-color: rgb(238, 238, 238)"] { background: #EEEEEE !important; }
-                  
-                  @page { size: A4 portrait; margin: 15mm; }
-                </style>
-              </head>
-              <body>
-                <h1 style="text-align: center; font-size: 24px; margin-bottom: 5px;">Full Moon Party Volunteer Schedule</h1>
-                <h2 style="text-align: center; font-size: 16px; margin-top: 0; color: #555 !important;">${fmpDate} • ${activeTab.charAt(0).toUpperCase() + activeTab.slice(1)} View</h2>
-                ${printContent}
-              </body>
-            </html>
-          `);
-          printWindow.document.close();
-          setTimeout(() => {
-            printWindow.focus();
-            printWindow.print();
-          }, 1500);
-        } catch (e) { showAlert("Print failed: " + e.message); }
-      }
-
-      function handleDownloadAsPNG(targetTab) {
-        try {
-          const element = document.getElementById(targetTab || activeTab);
-          if (!element) return showAlert('No content found to download');
-
-          const loadingMsg = document.createElement('div');
-          loadingMsg.style.cssText = `position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:white;padding:20px;border:2px solid #ff4fa3;border-radius:8px;z-index:9999;font-family:Arial,sans-serif;font-size:16px;box-shadow:0 4px 12px rgba(0,0,0,0.3);`;
-          loadingMsg.innerHTML = `<div>Generating PNG...</div><div style="font-size: 12px; color: #666; margin-top: 5px;">Please wait...</div>`;
-          document.body.appendChild(loadingMsg);
-
-          const stripSpecialistText = (clonedDoc) => {
-            const noExportEls = clonedDoc.querySelectorAll('.no-export');
-            noExportEls.forEach(el => { el.style.display = 'none'; });
-
-            const replacements = [];
-            for (const s of staff) {
-              const parsed = parseStaffName(s);
-              if (parsed.isSpecialist) replacements.push({ from: s, to: parsed.displayName });
-            }
-            if (replacements.length === 0) return;
-            const staffNameElements = clonedDoc.querySelectorAll('.staff-name');
-            staffNameElements.forEach(el => {
-              let text = el.textContent;
-              for (const r of replacements) if (text === r.from) el.textContent = r.to;
-            });
-            const allElements = clonedDoc.querySelectorAll('.head, .person-card h3, .day-title, td, th, div, span');
-            allElements.forEach(el => {
-              if (el.children.length === 0) {
-                let text = el.textContent;
-                let changed = false;
-                for (const r of replacements) {
-                  if (text.includes(r.from)) { text = text.split(r.from).join(r.to); changed = true; }
+          const fmpObj = new Date(fmpDate + "T00:00:00Z");
+          const eMonth = fmpObj.toLocaleString('en-US', {month: 'short', timeZone: 'UTC'}).toUpperCase();
+          const eYear = fmpObj.getUTCFullYear().toString().slice(-2);
+          const eventNameStr = `${eMonth}${eYear}`;
+          
+          Array.from(dayBlocks).forEach((dayBlock, index) => {
+            setTimeout(() => {
+              window.html2canvas(dayBlock, { useCORS: true, allowTaint: true, scale: 4, backgroundColor: '#ffffff', logging: false, width: dayBlock.scrollWidth, height: dayBlock.scrollHeight, onclone: stripSpecialistText })
+              .then(canvas => {
+                const imgData = canvas.toDataURL('image/png');
+                
+                const dayLabel = result.activeDays[index];
+                let offset = 0;
+                if (dualFullMoonMode) {
+                  const dualMoonOffsets = { "FMP-2": -2, "FMP-1": -1, "FMP": 0, "FMP+1": 1, "FMP+2": 2, "FMP2": 3, "FMP2+1": 4, "FMP2+2": 5 };
+                  offset = dualMoonOffsets[dayLabel] || 0;
+                } else {
+                  offset = ORDERED_LABELS.indexOf(dayLabel) - ORDERED_LABELS.indexOf("FMP");
                 }
-                if (changed) el.textContent = text;
-              }
-            });
-          };
-
-          if (targetTab === 'schedule' || (activeTab === 'schedule' && !targetTab)) {
-            handleScheduleDayExports(element, loadingMsg, stripSpecialistText);
-            return;
-          }
-
-          window.html2canvas(element, { useCORS: true, allowTaint: true, scale: 1.2, backgroundColor: '#ffffff', logging: false, width: element.scrollWidth, height: element.scrollHeight, onclone: stripSpecialistText })
-          .then(canvas => {
-            try {
-              const imgData = canvas.toDataURL('image/png');
-              const fileName = `volunteer-schedule-${targetTab || activeTab}-${fmpDate}.png`;
-              const newWindow = window.open('', '_blank', 'width=1000,height=800');
-              newWindow.document.write(`
-                <html><head><title>${fileName}</title></head><body style="margin:0;padding:20px;text-align:center;">
-                  <h2>📥 Save Your Schedule Image</h2>
-                  <img src="${imgData}" style="max-width:100%; border:1px solid #ccc;" />
-                </body></html>
-              `);
-              newWindow.document.close();
-              document.body.removeChild(loadingMsg);
-            } catch (err) {
-              document.body.removeChild(loadingMsg);
-              showAlert('Error creating image.');
-            }
+                const iso = addDaysISO(fmpDate, offset);
+                
+                const dayObj = new Date(iso + "T00:00:00Z");
+                const dDate = dayObj.getUTCDate();
+                let dMonth = dayObj.toLocaleString('en-US', {month: 'short', timeZone: 'UTC'});
+                dMonth = dMonth.charAt(0).toUpperCase() + dMonth.slice(1).toLowerCase(); 
+                
+                const fileName = `${eventNameStr} ${dDate}${dMonth}.png`;
+                
+                const link = document.createElement('a');
+                link.href = imgData;
+                link.download = fileName;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                exportCount++;
+                if (exportCount === totalDays) resolve();
+              }).catch(() => { exportCount++; if(exportCount === totalDays) resolve(); });
+            }, index * 800); 
           });
-        } catch (e) { showAlert("PNG export failed: " + e.message); }
-      }
-
-      function handleScheduleDayExports(scheduleElement, loadingMsg, stripSpecialistText) {
-        const dayBlocks = scheduleElement.querySelectorAll('.day-block');
-        if (dayBlocks.length === 0) { document.body.removeChild(loadingMsg); return showAlert("No day blocks found"); }
-        
-        let exportCount = 0;
-        const totalDays = dayBlocks.length;
-        const popupWindows = [];
-        Array.from(dayBlocks).forEach((dayBlock, index) => {
-          const newWindow = window.open('', `day_${index}`, 'width=900,height=700');
-          if (newWindow) { newWindow.document.write(`<html><body><h3>Generating...</h3></body></html>`); newWindow.document.close(); popupWindows[index] = newWindow; }
-        });
-        
-        dayBlocks.forEach((dayBlock, index) => {
-          setTimeout(() => {
-            window.html2canvas(dayBlock, { useCORS: true, allowTaint: true, scale: 4, backgroundColor: '#ffffff', logging: false, width: dayBlock.scrollWidth, height: dayBlock.scrollHeight, onclone: stripSpecialistText })
-            .then(canvas => {
-              const imgData = canvas.toDataURL('image/png');
-              const fileName = `schedule-Day${index + 1}-${fmpDate}.png`;
-              const targetWindow = popupWindows[index];
-              if (targetWindow && !targetWindow.closed) {
-                targetWindow.document.open();
-                targetWindow.document.write(`<html><body style="text-align:center;"><img src="${imgData}" style="max-width:100%;" /></body></html>`);
-                targetWindow.document.close();
-              }
-              exportCount++;
-              if (exportCount === totalDays) { document.body.removeChild(loadingMsg); showAlert('Success! Saved multiple tabs.'); }
-            }).catch(() => { exportCount++; if(exportCount === totalDays) document.body.removeChild(loadingMsg); });
-          }, index * 500);
         });
       }
 
       function handleMultiCardExport(tabType) {
-        try {
+        return new Promise((resolve) => {
           const containerElement = document.getElementById(tabType);
-          if (!containerElement) return showAlert('No content found to export');
+          if (!containerElement) { resolve(); return; }
           const cards = containerElement.querySelectorAll(tabType === 'people' ? '.person-card' : '.person-list');
-          if (cards.length === 0) return showAlert('No cards found');
-
-          const loadingMsg = document.createElement('div');
-          loadingMsg.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:white;padding:20px;border:2px solid #ff4fa3;border-radius:8px;z-index:9999;';
-          loadingMsg.textContent = 'Creating grids...';
-          document.body.appendChild(loadingMsg);
+          if (cards.length === 0) { resolve(); return; }
 
           const total = cards.length;
           let gridCols, gridRows;
@@ -2489,11 +2345,10 @@
           const pageGroups = [];
           for (let i = 0; i < cards.length; i += cardsPerPage) pageGroups.push(Array.from(cards).slice(i, i + cardsPerPage));
 
-          const popupWindows = [];
-          pageGroups.forEach((_, pageIndex) => {
-            const newWindow = window.open('', `${tabType}_grid_${pageIndex}`, 'width=1200,height=900');
-            if (newWindow) { newWindow.document.write(`<html><body><h3>Loading...</h3></body></html>`); newWindow.document.close(); popupWindows[pageIndex] = newWindow; }
-          });
+          const fmpObj = new Date(fmpDate + "T00:00:00Z");
+          const eMonth = fmpObj.toLocaleString('en-US', {month: 'short', timeZone: 'UTC'}).toUpperCase();
+          const eYear = fmpObj.getUTCFullYear().toString().slice(-2);
+          const eventNameStr = `${eMonth}${eYear}`;
 
           let exportCount = 0;
           pageGroups.forEach((cardGroup, pageIndex) => {
@@ -2517,26 +2372,91 @@
               window.html2canvas(pageContainer, { useCORS: true, allowTaint: true, scale: 4, backgroundColor: '#ffffff', logging: false, width: gridWidth + 40, height: gridHeight + 40 })
               .then(canvas => {
                 const imgData = canvas.toDataURL('image/png');
-                const targetWindow = popupWindows[pageIndex];
-                if (targetWindow && !targetWindow.closed) {
-                  targetWindow.document.open();
-                  targetWindow.document.write(`<html><body style="text-align:center;"><img src="${imgData}" style="max-width:100%;" /></body></html>`);
-                  targetWindow.document.close();
-                }
+                const fileName = `${eventNameStr} ${tabType === 'people' ? 'Cards' : 'List'} Page ${pageIndex + 1}.png`;
+                
+                const link = document.createElement('a');
+                link.href = imgData;
+                link.download = fileName;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
                 document.body.removeChild(pageContainer);
                 exportCount++;
-                if (exportCount === pageGroups.length) document.body.removeChild(loadingMsg);
+                if (exportCount === pageGroups.length) resolve();
               }).catch(() => {
                 if (pageContainer.parentNode) document.body.removeChild(pageContainer);
                 exportCount++;
-                if (exportCount === pageGroups.length) {
-                  document.body.removeChild(loadingMsg);
-                  showAlert('Some grid exports failed. Check console for details.');
-                }
+                if (exportCount === pageGroups.length) resolve();
               });
-            }, pageIndex * 500);
+            }, pageIndex * 800); 
           });
-        } catch (e) { showAlert("Grid export failed: " + e.message); }
+        });
+      }
+
+      async function handleExportAllPNGs() {
+        if (!result) return showAlert('No content found to download');
+
+        const loadingMsg = document.createElement('div');
+        loadingMsg.style.cssText = `position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:white;padding:20px;border:2px solid #ff4fa3;border-radius:8px;z-index:9999;font-family:Arial,sans-serif;font-size:16px;box-shadow:0 4px 12px rgba(0,0,0,0.3);text-align:center;`;
+        loadingMsg.innerHTML = `<div>Generating All PNGs...</div><div style="font-size: 12px; color: #666; margin-top: 5px;">This may take a minute. Please don't click anything.</div>`;
+        document.body.appendChild(loadingMsg);
+
+        const stripSpecialistText = (clonedDoc) => {
+          const noExportEls = clonedDoc.querySelectorAll('.no-export');
+          noExportEls.forEach(el => { el.style.display = 'none'; });
+
+          const replacements = [];
+          for (const s of staff) {
+            const parsed = parseStaffName(s);
+            if (parsed.isSpecialist) replacements.push({ from: s, to: parsed.displayName });
+          }
+          if (replacements.length === 0) return;
+          const staffNameElements = clonedDoc.querySelectorAll('.staff-name');
+          staffNameElements.forEach(el => {
+            let text = el.textContent;
+            for (const r of replacements) if (text === r.from) el.textContent = r.to;
+          });
+          const allElements = clonedDoc.querySelectorAll('.head, .person-card h3, .day-title, td, th, div, span');
+          allElements.forEach(el => {
+            if (el.children.length === 0) {
+              let text = el.textContent;
+              let changed = false;
+              for (const r of replacements) {
+                if (text.includes(r.from)) { text = text.split(r.from).join(r.to); changed = true; }
+              }
+              if (changed) el.textContent = text;
+            }
+          });
+        };
+
+        try {
+          const origTab = activeTab;
+
+          // 1. Export Schedule Days
+          setActiveTab('schedule');
+          await new Promise(r => setTimeout(r, 500)); 
+          const scheduleEl = document.getElementById('schedule');
+          if (scheduleEl) await handleScheduleDayExports(scheduleEl, stripSpecialistText);
+
+          // 2. Export People Cards
+          setActiveTab('people');
+          await new Promise(r => setTimeout(r, 500));
+          await handleMultiCardExport('people');
+
+          // 3. Export List
+          setActiveTab('list');
+          await new Promise(r => setTimeout(r, 500));
+          await handleMultiCardExport('list');
+
+          // Restore UI
+          setActiveTab(origTab);
+          document.body.removeChild(loadingMsg);
+          showAlert('Success! Exported all Days, Cards, and Lists to your Downloads folder.');
+        } catch (err) {
+          if (loadingMsg.parentNode) document.body.removeChild(loadingMsg);
+          showAlert('Error during bulk export: ' + err.message);
+        }
       }
 
       function dayHeader(label) {
@@ -2638,9 +2558,7 @@
           
           {result && (
             <div className="print-actions">
-              <button onClick={handlePrint} className="btn small">Print Current Tab</button>
-              {activeTab === 'schedule' && (<button onClick={() => handleDownloadAsPNG(activeTab)} className="btn small">Export Days as PNGs</button>)}
-              {(activeTab === 'people' || activeTab === 'list') && (<button onClick={() => handleMultiCardExport(activeTab)} className="btn small">Export Optimized Grids</button>)}
+              <button onClick={handleExportAllPNGs} className="btn small">Export All PNGs (Days + Cards + List)</button>
             </div>
           )}
 
