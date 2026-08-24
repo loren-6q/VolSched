@@ -160,11 +160,11 @@
     import React, { useMemo, useState, useEffect, useRef } from "react";
     import { createRoot } from "react-dom/client";
     import { initializeApp } from "firebase/app";
-    import { getFirestore, doc, setDoc, getDoc } from "firebase/firestore";
+    import { getFirestore, doc, setDoc, getDoc, collection, getDocs } from "firebase/firestore";
     import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 
     /* =========================================================
-       FIREBASE CONFIG
+       FIREBASE CONFIG 1: SCHEDULER (Saves, History)
        ========================================================= */
     const firebaseConfig = {
       apiKey: "AIzaSyCuriSOHjlUTwOuB8HwsIfF6l9euwNem8A",
@@ -179,6 +179,26 @@
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
     const auth = getAuth(app);
+
+    /* =========================================================
+       FIREBASE CONFIG 2: VOLUNTEER CALENDAR (Read-Only)
+       ========================================================= */
+    const calendarConfig = {
+      apiKey: "AIzaSyDd_i6as2LtvNWE1I44HFCU0LyJ4iO7KKQ",
+      authDomain: "volcalendar1.firebaseapp.com",
+      projectId: "volcalendar1",
+      storageBucket: "volcalendar1.firebasestorage.app",
+      messagingSenderId: "1081934202587",
+      appId: "1:498061470007:web:a6e6d230dfef812b04d2b2" // Overridden natively by initialization
+    };
+    
+    // Override the appId with your exact calendar appId
+    calendarConfig.appId = "1:1081934202587:web:28b226efb37216a2442efe";
+
+    // Initialize second app with a unique name so it doesn't conflict
+    const calendarApp = initializeApp(calendarConfig, "volCalendarApp");
+    const calendarDb = getFirestore(calendarApp);
+    const calendarAuth = getAuth(calendarApp);
 
     /* =========================================================
        CORE SCHEDULING ALGORITHMS & LOGIC
@@ -234,7 +254,7 @@
 
     const LIMITS = {
       Runner: { min: 2, max: 2 },
-      "Social Media": { min: 1, max: 3 },
+      "Social Media": { min: 1, max: 2 },
       "Promo Out": { min: 2, max: 6 },
       "Promo In": { min: 1, max: 2 },
       "Promo Gate": { min: 2, max: 4 },
@@ -245,7 +265,7 @@
     };
 
     const PRIORITY = [
-      "Promo Gate", "Promo Out", "Social Media", "Promo In",
+      "Promo Gate", "Promo Out", "Promo In", "Social Media",
       "Games", "Runner", "Beer Bar", "Bucket Bar",
     ];
 
@@ -314,6 +334,10 @@
           const hasSpecialist = specialists[task] && specialists[task].length > 0;
           if (!enabledTasks[task] && !hasSpecialist) continue;
           if (task === "Promo Gate" && day !== "FMP" && day !== "FMP2") continue;
+          if (task === "Runner") {
+             if (day === "FMP+2" || day === "FMP2+2") continue;
+             if ((day === "FMP+1" || day === "FMP2+1") && staff.length <= 10) continue;
+          }
           
           for (const [start, end] of ranges) {
             const { startIdx, span } = spanCols(start, end);
@@ -398,7 +422,9 @@
       function canTake(person, sh) {
         for (let h = sh.startIdx; h < sh.startIdx + sh.span; h++)
           if (dayBusy[sh.day][person][h]) return false;
-        if (dayHours[sh.day][person] + sh.span > 9) return false;
+          
+        const dayCap = (sh.day === "FMP+1" || sh.day === "FMP+2" || sh.day === "FMP+3" || sh.day === "FMP2+1" || sh.day === "FMP2+2") ? 6 : 9;
+        if (dayHours[sh.day][person] + sh.span > dayCap) return false;
 
         const parsed = parseStaffName(person);
         const allTasksInPlan = new Set();
@@ -541,7 +567,7 @@
       }
 
       // --- PHASE 1, RULE 1: FMP-1 & FMP Maximization ---
-      const highVolumeDays = ["FMP-1", "FMP", "FMP2"];
+      const highVolumeDays = ["FMP-2", "FMP-1", "FMP", "FMP2"];
       for (const day of activeDays) {
         if (!highVolumeDays.includes(day)) continue;
         
@@ -550,7 +576,7 @@
           progressed = false;
           const availableStaff = staff.filter(p => dayHours[day][p] < 9 && !parseStaffName(p).isSpecialist);
           
-          // Sort by WEEKLY hours first, then daily hours to maintain balance!
+          // CRITICAL FIX: Sort by WEEKLY hours first, then daily hours! 
           availableStaff.sort((a, b) => {
             if (weeklyHours[a] !== weeklyHours[b]) return weeklyHours[a] - weeklyHours[b];
             return dayHours[day][a] - dayHours[day][b];
@@ -560,9 +586,11 @@
             const possibleShifts = shifts.filter(s => s.day === day && canTake(person, s));
             if (possibleShifts.length > 0) {
               possibleShifts.sort((a, b) => {
-                const isPromoA = a.task.includes("Promo") ? -1 : 1;
-                const isPromoB = b.task.includes("Promo") ? -1 : 1;
-                if (isPromoA !== isPromoB) return isPromoA - isPromoB;
+                const ai = PRIORITY.indexOf(a.task);
+                const bi = PRIORITY.indexOf(b.task);
+                const priA = ai === -1 ? 99 : ai;
+                const priB = bi === -1 ? 99 : bi;
+                if (priA !== priB) return priA - priB;
                 return a.assigned.length - b.assigned.length;
               });
               
@@ -599,7 +627,8 @@
           if (assigned) continue;
           
           for (const day of activeDays) {
-            if (dayHours[day][person] >= 9) continue;
+            const dayCap = (day === "FMP+1" || day === "FMP+2" || day === "FMP+3" || day === "FMP2+1" || day === "FMP2+2") ? 6 : 9;
+            if (dayHours[day][person] >= dayCap) continue;
             
             const span = Math.min(gap, 2); 
             let foundStartIdx = -1;
@@ -818,9 +847,10 @@
       }
 
       for (const d of activeDays) {
+        const dayCap = (d === "FMP+1" || d === "FMP+2" || d === "FMP+3" || d === "FMP2+1" || d === "FMP2+2") ? 6 : 9;
         for (const p of Object.keys(daySum[d] || {})) {
-          if (daySum[d][p] > 9) {
-            const msg = `Daily cap: ${p} has ${daySum[d][p]}h on ${d} (max 9)`;
+          if (daySum[d][p] > dayCap) {
+            const msg = `Daily cap: ${p} has ${daySum[d][p]}h on ${d} (max ${dayCap})`;
             conflicts.push({ code: "over9", msg, person: p, day: d });
             for (const sh of shifts) {
               if (sh.day === d && sh.assigned.includes(p)) {
@@ -906,7 +936,8 @@
           }
         }
         if (overlap) reasons.push("overlap");
-        if (!isSwapContext && d + span > 9) reasons.push("daily>9");
+        const dayCap = (day === "FMP+1" || day === "FMP+2" || day === "FMP+3" || day === "FMP2+1" || day === "FMP2+2") ? 6 : 9;
+        if (!isSwapContext && d + span > dayCap) reasons.push("daily>cap");
         
         const prevShift = result.shifts.find((sft) => sft.day === day && sft.assigned.includes(s) && sft.startIdx + sft.span === startIdx);
         if (prevShift && prevShift.task === task) reasons.push("b2b");
@@ -1757,7 +1788,8 @@
 
           let currentDayHours = result.byDayTotals[person]?.[newShift.day] || 0;
           if (oldShift && oldShift.day === newShift.day) currentDayHours -= oldShift.span;
-          if (currentDayHours + newShift.span > 9) return false;
+          const dayCap = (newShift.day === "FMP+1" || newShift.day === "FMP+2" || newShift.day === "FMP+3" || newShift.day === "FMP2+1" || newShift.day === "FMP2+2") ? 6 : 9;
+          if (currentDayHours + newShift.span > dayCap) return false;
 
           const busyHours = new Set();
           for (const sh of result.shifts) {
@@ -1961,6 +1993,9 @@
       const [highlightedNames, setHighlightedNames] = useState({});
       const [selectedStaff, setSelectedStaff] = useState(null);
       const [showStaffPanel, setShowStaffPanel] = useState(false);
+      const [showSwapAssistant, setShowSwapAssistant] = useState(false);
+      const [swapMode, setSwapMode] = useState('hours');
+      const [swapConfig, setSwapConfig] = useState({ reduceHours: [], increaseHours: [], person: null, task: null, replacements: [] });
 
       const [enabledTasks, setEnabledTasks] = useState({
         "Runner": true, "Social Media": true, "Promo Out": true, "Promo In": true,
@@ -1968,6 +2003,109 @@
       });
 
       const [fmpDate, setFmpDate] = useState(() => new Date().toISOString().slice(0, 10));
+
+      const handleAutofillStaff = async () => {
+        try {
+          showAlert(`Connecting to Volunteer Calendar Database...`);
+          await signInAnonymously(calendarAuth);
+          
+          const staffRef = collection(calendarDb, 'artifacts', 'vol-calendar-wet-v1', 'public', 'data', 'staff');
+          const snapshot = await getDocs(staffRef); // Use getDocs for a 1-time fetch instead of onSnapshot
+          const allVolunteers = snapshot.docs.map(doc => doc.data());
+          
+          if (allVolunteers.length === 0) {
+            return showAlert(`Connected, but no volunteers found at the requested database path.`);
+          }
+
+          const fmpDatesList = [
+            "2026-01-03", "2026-02-02", "2026-03-03", "2026-04-02", "2026-05-01", "2026-06-01", "2026-06-29", 
+            "2026-07-31", "2026-08-28", "2026-09-26", "2026-10-27", "2026-11-24", "2026-12-24", "2026-12-31", 
+            "2027-01-22", "2027-02-22", "2027-03-22", "2027-04-21", "2027-05-21", "2027-06-19", "2027-07-20", 
+            "2027-08-17", "2027-09-15", "2027-10-16", "2027-11-13", "2027-12-13", "2027-12-31"
+          ];
+
+          const today = new Date(); 
+          today.setHours(0,0,0,0);
+          let targetFMP = fmpDatesList[fmpDatesList.length - 1]; 
+
+          for (let d of fmpDatesList) {
+            let fmp = new Date(d + "T12:00:00");
+            let fmwEnd = new Date(fmp); 
+            fmwEnd.setDate(fmp.getDate() + 2); 
+            if (today <= fmwEnd) {
+                targetFMP = d;
+                break;
+            }
+          }
+
+          const activeFmpDate = new Date(targetFMP + "T12:00:00");
+          const start = new Date(activeFmpDate); start.setDate(start.getDate() - 2); 
+          const end = new Date(activeFmpDate); end.setDate(end.getDate() + 2);
+
+          const fDate = (dt) => `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+          const fmwStart = fDate(start);
+          const fmwEnd = fDate(end);
+
+          // Safe date parser to handle Timestamps or string formats
+          const toDateStr = (val) => {
+              if (!val) return "";
+              if (typeof val === 'string') return val;
+              if (val.toDate) { 
+                  const d = val.toDate();
+                  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+              }
+              const d = new Date(val);
+              if (!isNaN(d.getTime())) {
+                  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+              }
+              return String(val);
+          };
+
+          const fmwStaffList = allVolunteers.filter(s => {
+              if (s.status === 'cancelled' || s.status === 'noshow') return false;
+              const inStr = toDateStr(s.checkIn);
+              const outStr = toDateStr(s.checkOut);
+              return (inStr <= fmwEnd) && (outStr > fmwStart);
+          });
+
+          if (fmwStaffList.length === 0) {
+              return showAlert(`Found ${allVolunteers.length} total volunteers, but ZERO matched the upcoming window (${fmwStart} to ${fmwEnd}). Check your database dates!`);
+          }
+
+          fmwStaffList.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+
+          const formattedList = fmwStaffList.map(s => {
+              const rawName = s.name || s.firstName || "Unknown";
+              const firstName = rawName.trim().split(' ')[0].toUpperCase(); // Grab first name and capitalize
+              
+              let taskString = "";
+              let percentage = "";
+
+              // Map database fields to exact Scheduler tasks
+              const rawJob = (s.job || s.jobs || s.specialty || "").toLowerCase();
+              if (rawJob.includes('social')) {
+                  taskString = "Social Media ";
+                  percentage = "80%";
+              } else if (rawJob.includes('bar')) {
+                  taskString = "Bucket Bar ";
+                  percentage = "80%";
+              }
+              
+              if (taskString) {
+                  return `${firstName}: ${taskString}${percentage}`;
+              }
+              return firstName;
+          });
+
+          setStaffInput(formattedList.join("\n"));
+          setFmpDate(targetFMP);
+          showAlert(`Successfully loaded ${fmwStaffList.length} volunteers and auto-set FMP to ${targetFMP}!`);
+
+        } catch (err) {
+          console.error(err);
+          showAlert("Failed to connect to Vol Calendar Database: " + err.message);
+        }
+      };
 
       useEffect(() => {
         const initAuth = async () => {
@@ -2076,10 +2214,12 @@
 
       const conflictsInfo = useMemo(() => detectConflicts(result), [result]);
 
-      const latestState = useRef({ result, staff, fmpDate, enabledTasks, includeMinus3, includePlus3, dualFullMoonMode });
+      const latestState = useRef({ result, staff, fmpDate, enabledTasks, includeMinus3, includePlus3, dualFullMoonMode, scheduleHistory });
+      const lastSavedHash = useRef("");
+
       useEffect(() => {
-        latestState.current = { result, staff, fmpDate, enabledTasks, includeMinus3, includePlus3, dualFullMoonMode };
-      }, [result, staff, fmpDate, enabledTasks, includeMinus3, includePlus3, dualFullMoonMode]);
+        latestState.current = { result, staff, fmpDate, enabledTasks, includeMinus3, includePlus3, dualFullMoonMode, scheduleHistory };
+      }, [result, staff, fmpDate, enabledTasks, includeMinus3, includePlus3, dualFullMoonMode, scheduleHistory]);
 
       useEffect(() => {
         if (!user) return;
@@ -2087,17 +2227,23 @@
           const current = latestState.current;
           if (!current.result) return;
           
+          // Prevent spamming Firebase if the schedule hasn't actually changed
+          const currentHash = JSON.stringify({ r: current.result, s: current.staff, d: current.fmpDate });
+          if (lastSavedHash.current === currentHash) return;
+          lastSavedHash.current = currentHash;
+          
           const snapshot = {
             timestamp: new Date().toISOString(), date: current.fmpDate, staff: current.staff,
             result: current.result, enabledTasks: current.enabledTasks, includeMinus3: current.includeMinus3,
             includePlus3: current.includePlus3, dualFullMoonMode: current.dualFullMoonMode,
           };
           
-          setScheduleHistory(prev => {
-            const newHistory = [snapshot, ...prev].slice(0, 20);
-            setDoc(doc(db, "schedules", "history"), { list: newHistory }).catch(e => console.error(e));
-            return newHistory;
-          });
+          // Reduced to 10 versions to prevent hitting 1MB Firestore document payload limits
+          const newHistory = [snapshot, ...current.scheduleHistory].slice(0, 10);
+          
+          setScheduleHistory(newHistory);
+          setDoc(doc(db, "schedules", "history"), { list: newHistory }).catch(e => console.error("History Save Error:", e));
+          
         }, 30000);
         return () => clearInterval(interval);
       }, [user]);
@@ -2259,6 +2405,100 @@
         });
       }
 
+      function handlePrint() {
+        try {
+          let printContent = '';
+          if (activeTab === 'schedule') {
+            const scheduleTables = document.querySelector('.schedule-stack');
+            if (scheduleTables) printContent = scheduleTables.outerHTML;
+            else return showAlert("No schedule content to print");
+          } else {
+            const tabContent = document.getElementById(activeTab);
+            if (tabContent) printContent = tabContent.innerHTML;
+            else return showAlert("No content available for printing");
+          }
+          
+          for (const s of staff) {
+            const parsed = parseStaffName(s);
+            if (parsed.isSpecialist) {
+              const escaped = s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              printContent = printContent.replace(new RegExp(escaped, 'g'), parsed.displayName);
+            }
+          }
+          
+          const printWindow = window.open('', '_blank', 'width=1200,height=900');
+          printWindow.document.write(`
+            <html>
+              <head>
+                <title>Volunteer Schedule - ${activeTab}</title>
+                <style>
+                  * { box-sizing: border-box; -webkit-print-color-adjust: exact !important; color-adjust: exact !important; print-color-adjust: exact !important; }
+                  body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; margin: 0; padding: 0; font-size: 12px; color: black !important; background: white; }
+                  .no-export { display: none !important; }
+                  
+                  /* Schedule Grid - Full Width A4 Stacked */
+                  .schedule-stack { display: block; width: 100%; }
+                  .day-block { width: 100%; margin-bottom: 40px; page-break-inside: avoid; break-inside: avoid; }
+                  .schedule-table { border-collapse: collapse; width: 100%; margin: 0; font-size: 11px; table-layout: fixed; border: 2px solid #000; }
+                  .schedule-table th, .schedule-table td { border: 1px solid #444 !important; padding: 6px 4px; text-align: center; }
+                  .schedule-table th { background-color: #f0f0f0 !important; font-weight: bold; border-bottom: 2px solid #000 !important; }
+                  .task-name { text-align: left !important; font-weight: bold; padding-left: 8px !important; width: 120px !important; border-right: 2px solid #000 !important; }
+                  .stripe-col { display: none !important; }
+                  .stripe { display: none !important; }
+                  .day-title { background: #e0e0e0 !important; font-weight: bold; padding: 10px; border: 2px solid #000 !important; border-bottom: none !important; font-size: 16px; text-align: center; text-transform: uppercase; }
+                  
+                  /* Clean up cells for pure calendar */
+                  .cell-wrap { min-height: 20px; display: flex; flex-direction: column; justify-content: center; }
+                  .staff-name { padding: 2px; font-weight: 600; font-size: 12px; }
+                  
+                  /* Other tabs (People/List) */
+                  .people-wrap { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+                  .person-card { border: 2px solid #000 !important; break-inside: avoid; page-break-inside: avoid; border-radius: 4px; overflow: hidden; }
+                  .person-head { background: #e0e0e0 !important; font-weight: bold; padding: 8px; border-bottom: 2px solid #000 !important; font-size: 14px; text-align: center; }
+                  .person-table { width: 100%; border-collapse: collapse; }
+                  .person-table th, .person-table td { border: 1px solid #666 !important; padding: 4px; font-size: 10px; text-align: center; }
+                  
+                  .list-wrap, div:has(.person-list) { display: grid !important; grid-template-columns: repeat(4, 1fr) !important; gap: 10px !important; }
+                  .person-list { border: 2px solid #000 !important; break-inside: avoid !important; page-break-inside: avoid !important; border-radius: 4px; overflow: hidden; }
+                  .person-list .head { background: #e0e0e0 !important; font-weight: bold; padding: 6px; border-bottom: 2px solid #000 !important; text-align: center; }
+                  .person-list table { width: 100%; border-collapse: collapse; font-size: 10px; }
+                  .person-list th, .person-list td { border: 1px solid #666 !important; padding: 4px; }
+                  .compact-date { font-weight: bold !important; background: #f5f5f5 !important; }
+                  
+                  /* Summary Tab */
+                  .summary-table { border-collapse: collapse; margin: 10px 0; font-size: 11px; }
+                  .summary-table th, .summary-table td { border: 1px solid #444 !important; padding: 6px; text-align: center; }
+                  .summary-table th { background: #eee !important; border-bottom: 2px solid #000 !important; font-weight: bold; }
+                  
+                  /* Colors */
+                  td[style*="background-color: #FFF6A2"], td[style*="background-color: rgb(255, 246, 162)"] { background: #FFF6A2 !important; }
+                  td[style*="background-color: #C5F7C8"], td[style*="background-color: rgb(197, 247, 200)"] { background: #C5F7C8 !important; }
+                  td[style*="background-color: #CBE5FF"], td[style*="background-color: rgb(203, 229, 255)"] { background: #CBE5FF !important; }
+                  td[style*="background-color: #BFF7F2"], td[style*="background-color: rgb(191, 247, 242)"] { background: #BFF7F2 !important; }
+                  td[style*="background-color: #B6EFE6"], td[style*="background-color: rgb(182, 239, 230)"] { background: #B6EFE6 !important; }
+                  td[style*="background-color: #DCCCFF"], td[style*="background-color: rgb(220, 204, 255)"] { background: #DCCCFF !important; }
+                  td[style*="background-color: #FFD6E7"], td[style*="background-color: rgb(255, 214, 231)"] { background: #FFD6E7 !important; }
+                  td[style*="background-color: #FFE1C6"], td[style*="background-color: rgb(255, 225, 198)"] { background: #FFE1C6 !important; }
+                  td[style*="background-color: #EEEEEE"], td[style*="background-color: rgb(238, 238, 238)"] { background: #EEEEEE !important; }
+                  
+                  @page { size: A4 portrait; margin: 15mm; }
+                </style>
+              </head>
+              <body>
+                <h1 style="text-align: center; font-size: 24px; margin-bottom: 5px;">Full Moon Party Volunteer Schedule</h1>
+                <h2 style="text-align: center; font-size: 16px; margin-top: 0; color: #555 !important;">${fmpDate} • ${activeTab.charAt(0).toUpperCase() + activeTab.slice(1)} View</h2>
+                ${printContent}
+              </body>
+            </html>
+          `);
+          printWindow.document.close();
+          setTimeout(() => {
+            printWindow.focus();
+            printWindow.print();
+          }, 1500);
+        } catch (e) { showAlert("Print failed: " + e.message); }
+      }
+
       function handleScheduleDayExports(scheduleElement, stripSpecialistText) {
         return new Promise((resolve) => {
           const dayBlocks = scheduleElement.querySelectorAll('.day-block');
@@ -2406,6 +2646,12 @@
           const noExportEls = clonedDoc.querySelectorAll('.no-export');
           noExportEls.forEach(el => { el.style.display = 'none'; });
 
+          // Force-remove any rows left over with no actual staff assignments
+          const rows = clonedDoc.querySelectorAll('.schedule-table tbody tr');
+          rows.forEach(row => {
+            if (!row.querySelector('.staff-name')) row.style.display = 'none';
+          });
+
           const replacements = [];
           for (const s of staff) {
             const parsed = parseStaffName(s);
@@ -2432,26 +2678,31 @@
 
         try {
           const origTab = activeTab;
+          const origCompact = isCompactView;
 
-          // 1. Export Schedule Days
+          // 1. Force the UI into compact schedule view for perfectly clean exports
+          setIsCompactView(true);
           setActiveTab('schedule');
-          await new Promise(r => setTimeout(r, 500)); 
+          await new Promise(r => setTimeout(r, 800)); // Allow React to re-render DOM
+          
           const scheduleEl = document.getElementById('schedule');
           if (scheduleEl) await handleScheduleDayExports(scheduleEl, stripSpecialistText);
 
           // 2. Export People Cards
           setActiveTab('people');
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise(r => setTimeout(r, 600));
           await handleMultiCardExport('people');
 
           // 3. Export List
           setActiveTab('list');
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise(r => setTimeout(r, 600));
           await handleMultiCardExport('list');
 
-          // Restore UI
+          // Restore UI state
+          setIsCompactView(origCompact);
           setActiveTab(origTab);
-          document.body.removeChild(loadingMsg);
+          
+          if (loadingMsg.parentNode) document.body.removeChild(loadingMsg);
           showAlert('Success! Exported all Days, Cards, and Lists to your Downloads folder.');
         } catch (err) {
           if (loadingMsg.parentNode) document.body.removeChild(loadingMsg);
@@ -2520,7 +2771,10 @@
               
               <div className="row" style={{ display: "flex", gap: 12, alignItems: "flex-start", paddingTop: 8 }}>
                 <div className="staff-input">
-                  <label>Staff (one per line):</label>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                    <label>Staff (one per line):</label>
+                    <button className="btn ghost" style={{ padding: "2px 6px", fontSize: 11 }} onClick={handleAutofillStaff} title="Fetch active volunteers from database">⬇️ Autofill</button>
+                  </div>
                   <StaffEditor value={staffInput} onChange={setStaffInput} />
                   <div style={{ fontSize: 11, color: "#666", marginTop: 4, lineHeight: 1.3 }}>💡 Specialist format: Name: Task %</div>
                 </div>
@@ -2557,8 +2811,9 @@
           </div>
           
           {result && (
-            <div className="print-actions">
+            <div className="print-actions" style={{ display: 'flex', gap: '8px' }}>
               <button onClick={handleExportAllPNGs} className="btn small">Export All PNGs (Days + Cards + List)</button>
+              <button onClick={handlePrint} className="btn small secondary">Print (PDF)</button>
             </div>
           )}
 
@@ -2572,15 +2827,16 @@
                     <div style={{ fontSize: 13, fontWeight: 700 }}>Conflict key:</div>
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}><div style={{ width: 16, height: 10, background: "var(--conf-red)" }}></div> Double-booked</div>
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}><div style={{ width: 16, height: 10, background: "var(--conf-orange)" }}></div> Back-to-back same task</div>
-                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}><div style={{ width: 16, height: 10, background: "var(--conf-purple)" }}></div> &gt;9 hrs/day</div>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}><div style={{ width: 16, height: 10, background: "var(--conf-purple)" }}></div> &gt;Daily Cap (6-9h)</div>
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}><div style={{ width: 16, height: 10, background: "var(--conf-blue)" }}></div> Uneven task distribution</div>
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}><div style={{ width: 16, height: 10, background: "var(--conf-deepred)" }}></div> +3 hrs above weekly avg</div>
-                    
-                    {Object.keys(highlightedNames).length > 0 && (
-                      <div style={{ marginLeft: 12 }}>
-                        <button className="btn small" onClick={clearAllHighlights} style={{ background: '#6b7280', borderColor: '#6b7280' }}>Clear {Object.keys(highlightedNames).length} Highlights</button>
-                      </div>
-                    )}
+                    <div style={{ marginLeft: 12, display: "flex", gap: 8, alignItems: "center" }}>
+                        {Object.keys(highlightedNames).length > 0 && (
+                          <div style={{ marginLeft: 12 }}>
+                            <button className="btn small" onClick={clearAllHighlights} style={{ background: '#6b7280', borderColor: '#6b7280' }}>Clear {Object.keys(highlightedNames).length} Highlights</button>
+                          </div>
+                        )}
+                    </div>
                   </div>
                 </div>
 
